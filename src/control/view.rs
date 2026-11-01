@@ -2,11 +2,20 @@
 
 use super::settings_popup;
 use super::{Overlay, Presenter};
-use rune::{Color, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
+use rune::{Color, Cursor, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Progress, Select,
 };
 use rune_theme_opencode::icons as oc;
+
+/// The empty stage's mark: a video frame with its play triangle, drawn on the catalog's grid
+/// (16pt, 1pt stroke) like the rest. No filmstrip rails: at icon size they cut through the
+/// triangle and turn the frame into stripes.
+static FILM: Icon = Icon {
+    name: "vidshow-film",
+    view: 16.0,
+    body: r#"<rect x="2" y="4" width="12" height="8" rx="1.6" stroke="currentColor"/><path d="M6.6 6.1 10.4 8 6.6 9.9Z" fill="currentColor" stroke="currentColor" stroke-linejoin="round"/>"#,
+};
 
 /// The mark OpenCode's icon catalog has no glyph for: the display picker's monitor, drawn on the
 /// catalog's own grid (16pt, 1pt stroke).
@@ -171,7 +180,8 @@ fn present_button(s: &Presenter, k: &Kit) -> El {
     }
 }
 
-/// The picture, or what to do to get one. Clicking it plays or pauses.
+/// The picture, or what to do to get one. With a clip, clicking it plays or pauses. With none, the
+/// whole area is a drop zone that also opens the file picker when clicked.
 fn stage(s: &Presenter, k: &Kit) -> El {
     let stage = el()
         .key("stage")
@@ -179,24 +189,64 @@ fn stage(s: &Presenter, k: &Kit) -> El {
         .grow(1.0)
         .min_h(0.0)
         .radius(k.radius.xl);
-    let stage = match s.clip.player() {
-        Some(player) if s.cfg.preview => stage.clip_rounded(k.radius.xl).fill(Color::BLACK).child(
-            el().key("preview")
-                .w_full()
-                .h_full()
-                .native_surface(player.preview_surface(), s.cfg.fit.surface()),
-        ),
-        other => stage.fill(Color::BLACK).center().child(
-            text(if other.is_some() {
-                "Preview is off"
-            } else {
-                "Drop a video file here"
-            })
-            .font(k.ty.ui_medium)
-            .color(k.c.text_muted),
-        ),
-    };
-    stage.on_press(Presenter::toggle_playing)
+    match s.clip.player() {
+        Some(player) if s.cfg.preview => stage
+            .clip_rounded(k.radius.xl)
+            .fill(Color::BLACK)
+            .child(
+                el().key("preview")
+                    .w_full()
+                    .h_full()
+                    .native_surface(player.preview_surface(), s.cfg.fit.surface()),
+            )
+            .on_press(Presenter::toggle_playing),
+        Some(_) => stage
+            .fill(Color::BLACK)
+            .center()
+            .child(
+                text("Preview is off")
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_muted),
+            )
+            .on_press(Presenter::toggle_playing),
+        None => stage
+            .fill(k.c.bg_deep)
+            .border(1.0, k.c.border_muted)
+            .border_dash(7.0, 6.0)
+            .hover(k.c.hover)
+            .press(k.c.pressed)
+            .cursor(Cursor::Pointer)
+            .center()
+            .child(empty_stage(k))
+            .on_press_tx(Presenter::pick),
+    }
+}
+
+/// What to do when there is nothing to show: a mark and a single hint, short enough that the
+/// dashed frame reads as the thing to aim at.
+fn empty_stage(k: &Kit) -> El {
+    col()
+        .key("empty-stage")
+        .gap(10.0)
+        .center()
+        .child(
+            el().size(56.0, 56.0)
+                .radius(28.0)
+                .fill(k.c.layer_02)
+                .border(1.0, k.c.border_base)
+                .center()
+                .child(icon(&FILM, 26.0).color(k.c.icon_muted)),
+        )
+        .child(
+            text("Drop a video file here")
+                .font(k.ty.ui_medium)
+                .color(k.c.text_base),
+        )
+        .child(
+            text("Click to choose a file")
+                .font(k.ty.caption())
+                .color(k.c.text_muted),
+        )
 }
 
 fn scrub_row(s: &Presenter, k: &Kit) -> El {
