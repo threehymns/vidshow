@@ -1,5 +1,6 @@
 //! What the control window draws: the header, the stage, the seek bar and the transport.
 
+use super::settings_popup;
 use super::{Overlay, Presenter};
 use rune::{Color, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
 use rune_kit::{
@@ -7,8 +8,8 @@ use rune_kit::{
 };
 use rune_theme_opencode::icons as oc;
 
-/// The marks OpenCode's icon catalog has no glyph for — the display picker's monitor, and loop and
-/// sound in both their states — drawn on the catalog's own grid: 16pt, 1pt stroke.
+/// The mark OpenCode's icon catalog has no glyph for: the display picker's monitor, drawn on the
+/// catalog's own grid (16pt, 1pt stroke).
 static MONITOR: Icon = Icon {
     name: "vidshow-monitor",
     view: 16.0,
@@ -57,25 +58,160 @@ pub fn clock(seconds: f64) -> String {
     }
 }
 
-/// A player-style toggle: the glyph, the brightness and the tooltip all follow one flag, so an
-/// option that is off never looks like one that is on.
-fn toggle_button(
-    k: &Kit,
-    on: bool,
-    icons: (&'static Icon, &'static Icon),
-    help: (&'static str, &'static str),
-    press: fn(&mut Presenter),
-) -> El {
-    IconButton::new(if on { icons.0 } else { icons.1 })
-        .variant(if on {
-            IconButtonVariant::Ghost
-        } else {
-            IconButtonVariant::GhostMuted
-        })
-        .control_size(ControlSize::Large)
-        .help(if on { help.0 } else { help.1 })
-        .on_press(press)
-        .build(k)
+pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
+    let k = rune_theme_opencode::kit(cx.system_dark());
+    // Panels that float above the window are collected while the rest is built.
+    let mut layer = Vec::new();
+    let mut root = col()
+        .w_full()
+        .h_full()
+        .fill(k.c.bg_base)
+        .padding(14.0)
+        .gap(10.0)
+        .child(header(s, k, &mut layer))
+        .child(stage(s, k))
+        .child(scrub_row(s, k))
+        .child(transport(s, k))
+        .on_drop_files(|s: &mut Presenter, files, _tx| {
+            if let Some(first) = files.first() {
+                s.load(first.clone());
+            }
+        });
+    // Errors are the only standing text: everything else is a control or the picture.
+    if let Some(problem) = s.problem() {
+        root = root.child(
+            text(problem.as_str())
+                .font(k.ty.text_xsmall_medium)
+                .color(k.c.danger.fg),
+        );
+    }
+    settings_popup::settings_window(s, k, &mut layer);
+    rune_kit::root(root, layer)
+}
+
+/// The clip's name and details, the display picker, and the window's own buttons.
+fn header(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
+    let selected = s.selected_display();
+    let labels = s.display_labels();
+    // With no display there is nothing to pick from, so the listbox never opens.
+    let open = s.overlay == Overlay::DisplayPicker && !labels.is_empty();
+    let trigger = row()
+        .key("present_on_mark")
+        .gap(6.0)
+        .center_y()
+        .child(icon(&MONITOR, 14.0).color(k.c.icon_muted))
+        .child(
+            Select::new("present_on", &labels)
+                .current(selected.map(|index| labels[index].as_str()))
+                .placeholder("No display")
+                .open(open)
+                .on_toggle(|s: &mut Presenter| s.toggle_display_picker())
+                .on_close(|s: &mut Presenter| s.dismiss(Overlay::DisplayPicker))
+                .on_choose(|s: &mut Presenter, value: &str, _tx: &mut Tx| {
+                    s.choose_display_label(value);
+                })
+                .build(k, layer),
+        );
+
+    row()
+        .h(36.0)
+        .gap(10.0)
+        .center_y()
+        .w_full()
+        .child(title(s, k))
+        .child(trigger)
+        .child(spacer())
+        .child(
+            IconButton::new(&oc::SETTINGS_GEAR)
+                .control_size(ControlSize::Large)
+                .help("Settings")
+                .on_press(|s: &mut Presenter| s.overlay = Overlay::Settings)
+                .build(k),
+        )
+        .child(
+            Button::new("Open…")
+                .control_size(ControlSize::Large)
+                .on_press_tx(Presenter::pick)
+                .build(k),
+        )
+        .child(present_button(s, k))
+}
+
+fn title(s: &Presenter, k: &Kit) -> El {
+    let mut title = row().gap(4.0).center_y();
+    if let Some(player) = s.clip.player() {
+        title = title.child(text(player.info.title()).font(k.ty.ui).color(k.c.text_base));
+    }
+    if let Some(info) = s.video_info() {
+        // A plain mark in a fixed box: no button chrome, and nothing to mis-centre.
+        title = title.child(
+            el().key("video-info")
+                .size(20.0, 20.0)
+                .center()
+                .hit()
+                .help(info)
+                .child(icon(&oc::INFO, 14.0).color(k.c.icon_faint)),
+        );
+    }
+    title
+}
+
+fn present_button(s: &Presenter, k: &Kit) -> El {
+    if s.projection.is_presenting() {
+        Button::new("End")
+            .control_size(ControlSize::Large)
+            .on_press(Presenter::toggle_present)
+            .build(k)
+    } else {
+        Button::new("Present")
+            .variant(ButtonVariant::Submit)
+            .control_size(ControlSize::Large)
+            .on_press(Presenter::toggle_present)
+            .build(k)
+    }
+}
+
+/// The picture, or what to do to get one. Clicking it plays or pauses.
+fn stage(s: &Presenter, k: &Kit) -> El {
+    let stage = el()
+        .key("stage")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .radius(k.radius.xl);
+    let stage = match s.clip.player() {
+        Some(player) if s.cfg.preview => stage.clip_rounded(k.radius.xl).fill(Color::BLACK).child(
+            el().key("preview")
+                .w_full()
+                .h_full()
+                .native_surface(player.preview_surface(), s.cfg.fit.surface()),
+        ),
+        other => stage.fill(Color::BLACK).center().child(
+            text(if other.is_some() {
+                "Preview is off"
+            } else {
+                "Drop a video file here"
+            })
+            .font(k.ty.ui_medium)
+            .color(k.c.text_muted),
+        ),
+    };
+    stage.on_press(Presenter::toggle_playing)
+}
+
+fn scrub_row(s: &Presenter, k: &Kit) -> El {
+    let (time, duration, progress) = match s.clip.player() {
+        Some(player) => (player.time(), player.duration(), player.progress()),
+        None => (0.0, 0.0, 0.0),
+    };
+    let shown_time = s.scrub.map(|fraction| fraction * duration).unwrap_or(time);
+    row()
+        .gap(10.0)
+        .center_y()
+        .w_full()
+        .child(text(clock(shown_time)).font(k.ty.mono).color(k.c.text_base))
+        .child(seek_bar(k, s, duration, progress))
+        .child(text(clock(duration)).font(k.ty.mono).color(k.c.text_muted))
 }
 
 fn seek_bar(k: &Kit, s: &Presenter, duration: f64, progress: f32) -> El {
@@ -107,151 +243,10 @@ fn seek_bar(k: &Kit, s: &Presenter, duration: f64, progress: f32) -> El {
         })
 }
 
-pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
-    let k = rune_theme_opencode::kit(cx.system_dark());
-    let (time, duration, progress, playing) = match s.clip.player() {
-        Some(player) => (
-            player.time(),
-            player.duration(),
-            player.progress(),
-            player.is_playing(),
-        ),
-        None => (0.0, 0.0, 0.0, false),
-    };
-    let shown_time = s.scrub.map(|fraction| fraction * duration).unwrap_or(time);
-
-    // The clip's own details (size, frame rate, audio) hang off an info icon beside the title.
-    let mut title = row().gap(4.0).center_y();
-    if let Some(player) = s.clip.player() {
-        title = title.child(text(player.info.title()).font(k.ty.ui).color(k.c.text_base));
-    }
-    if let Some(info) = s.video_info() {
-        // A plain mark in a fixed box: no button chrome, and nothing to mis-centre.
-        title = title.child(
-            el().key("video-info")
-                .size(20.0, 20.0)
-                .center()
-                .hit()
-                .help(info)
-                .child(icon(&oc::INFO, 14.0).color(k.c.icon_faint)),
-        );
-    }
-
-    let selected = s.selected_display();
-    let labels = s.display_labels();
-    // With no display there is nothing to pick from, so the listbox never opens.
-    let open = s.overlay == Overlay::DisplayPicker && !labels.is_empty();
-    // The listbox is mounted as an overlay, above the rest of the control window.
-    let mut layer = Vec::new();
-    let trigger = row()
-        .key("present_on_mark")
-        .gap(6.0)
-        .center_y()
-        .child(icon(&MONITOR, 14.0).color(k.c.icon_muted))
-        .child(
-            Select::new("present_on", &labels)
-                .current(selected.map(|index| labels[index].as_str()))
-                .placeholder("No display")
-                .open(open)
-                .on_toggle(|s: &mut Presenter| {
-                    if !s.displays.is_empty() {
-                        s.overlay = if s.overlay == Overlay::DisplayPicker {
-                            Overlay::None
-                        } else {
-                            Overlay::DisplayPicker
-                        };
-                    }
-                })
-                .on_close(|s: &mut Presenter| {
-                    if s.overlay == Overlay::DisplayPicker {
-                        s.overlay = Overlay::None;
-                    }
-                })
-                .on_choose(|s: &mut Presenter, value: &str, _tx: &mut Tx| {
-                    s.choose_display_label(value);
-                })
-                .build(k, &mut layer),
-        );
-
-    let header = row()
-        .h(36.0)
-        .gap(10.0)
-        .center_y()
-        .w_full()
-        .child(title)
-        .child(trigger)
-        .child(spacer())
-        .child(
-            IconButton::new(&oc::SETTINGS_GEAR)
-                .control_size(ControlSize::Large)
-                .help("Settings")
-                .on_press(|s: &mut Presenter| s.overlay = Overlay::Settings)
-                .build(k),
-        )
-        .child(
-            Button::new("Open…")
-                .control_size(ControlSize::Large)
-                .on_press_tx(Presenter::pick)
-                .build(k),
-        )
-        .child(if s.presenting {
-            Button::new("End")
-                .control_size(ControlSize::Large)
-                .on_press(Presenter::toggle_present)
-                .build(k)
-        } else {
-            Button::new("Present")
-                .variant(ButtonVariant::Submit)
-                .control_size(ControlSize::Large)
-                .on_press(Presenter::toggle_present)
-                .build(k)
-        });
-
-    let stage = match s.clip.player() {
-        Some(player) if s.cfg.preview => el()
-            .key("stage")
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .radius(k.radius.xl)
-            .clip_rounded(k.radius.xl)
-            .fill(Color::BLACK)
-            .child(
-                el().key("preview")
-                    .w_full()
-                    .h_full()
-                    .native_surface(player.preview_surface(), s.cfg.fit.surface()),
-            )
-            .on_press(Presenter::toggle_playing),
-        _ => el()
-            .key("stage")
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .radius(k.radius.xl)
-            .fill(Color::BLACK)
-            .center()
-            .child(
-                text(if s.clip.player().is_some() {
-                    "Preview is off"
-                } else {
-                    "Drop a video file here"
-                })
-                .font(k.ty.ui_medium)
-                .color(k.c.text_muted),
-            )
-            .on_press(Presenter::toggle_playing),
-    };
-
-    let scrub_row = row()
-        .gap(10.0)
-        .center_y()
-        .w_full()
-        .child(text(clock(shown_time)).font(k.ty.mono).color(k.c.text_base))
-        .child(seek_bar(k, s, duration, progress))
-        .child(text(clock(duration)).font(k.ty.mono).color(k.c.text_muted));
-
-    let transport = row()
+/// Play, the toggles that only matter while it plays, and the fit.
+fn transport(s: &Presenter, k: &Kit) -> El {
+    let playing = s.clip.player().is_some_and(|player| player.is_playing());
+    row()
         .gap(8.0)
         .center_y()
         .w_full()
@@ -281,31 +276,26 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 .control_size(ControlSize::Large)
                 .on_press(Presenter::toggle_fit)
                 .build(k),
-        );
+        )
+}
 
-    let mut root = col()
-        .w_full()
-        .h_full()
-        .fill(k.c.bg_base)
-        .padding(14.0)
-        .gap(10.0)
-        .child(header)
-        .child(stage)
-        .child(scrub_row)
-        .child(transport)
-        .on_drop_files(|s: &mut Presenter, files, _tx| {
-            if let Some(first) = files.first() {
-                s.open(first.clone());
-            }
-        });
-    // Errors are the only standing text: everything else is a control or the picture.
-    if let Some(problem) = s.problem() {
-        root = root.child(
-            text(problem)
-                .font(k.ty.text_xsmall_medium)
-                .color(k.c.danger.fg),
-        );
-    }
-    super::settings_popup::settings_window(s, k, &mut layer);
-    rune_kit::root(root, layer)
+/// A player-style toggle: the glyph, the brightness and the tooltip all follow one flag, so an
+/// option that is off never looks like one that is on.
+fn toggle_button(
+    k: &Kit,
+    on: bool,
+    icons: (&'static Icon, &'static Icon),
+    help: (&'static str, &'static str),
+    press: fn(&mut Presenter),
+) -> El {
+    IconButton::new(if on { icons.0 } else { icons.1 })
+        .variant(if on {
+            IconButtonVariant::Ghost
+        } else {
+            IconButtonVariant::GhostMuted
+        })
+        .control_size(ControlSize::Large)
+        .help(if on { help.0 } else { help.1 })
+        .on_press(press)
+        .build(k)
 }

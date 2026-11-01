@@ -7,6 +7,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod cli;
 mod control;
 mod keybinds;
 mod media;
@@ -14,7 +15,8 @@ mod player;
 mod projection;
 mod settings;
 
-use control::{Clip, Overlay, Presenter, Startup};
+use cli::Startup;
+use control::{Clip, Overlay, Presenter};
 use keybinds::Keybinds;
 use media::Tools;
 use player::Wakers;
@@ -49,6 +51,9 @@ fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
     let tools = Tools::discover();
     let wakers = Wakers::new();
     let displays: Vec<Display> = displays.to_vec();
+    // One table for both windows, so a shortcut cannot mean one thing on the projector and
+    // another on the control window.
+    let keybinds = Keybinds::defaults();
 
     let mut control = App::new(AppSpec {
         min_size: Some((860.0, 620.0)),
@@ -94,7 +99,7 @@ fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
         hide_cursor: cfg.hide_cursor,
         notify,
         wakers: wakers.clone(),
-        keybinds: Keybinds::defaults(),
+        keybinds: keybinds.clone(),
     };
 
     // Wayland gives a client no say in where a window opens, so there the picture is a layer-shell
@@ -150,12 +155,11 @@ fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
 
     let control = control.init(move || Presenter {
         tools,
-        keybinds: Keybinds::defaults(),
+        keybinds,
         clip: Clip::None,
         cfg,
         displays,
         overlay: Overlay::None,
-        presenting: false,
         projection,
         wakers: wakers.clone(),
         notice: settings_problem,

@@ -1,7 +1,7 @@
 //! The settings popup: the presentation options that do not earn a place on the control window.
 //!
-//! It is a rune-kit dialog mounted over the control window, so it reads that window's state and
-//! applies every toggle to the running clip and projector straight away.
+//! It is a rune-kit dialog mounted over the control window, so every toggle applies to the running
+//! clip and projector straight away.
 
 use super::{Overlay, Presenter};
 use rune::{El, col};
@@ -17,11 +17,7 @@ pub fn settings_window(s: &Presenter, k: &Kit, layer: &mut Vec<El>) {
         .open(true)
         .fit()
         .width(360.0)
-        .on_close(|s: &mut Presenter| {
-            if s.overlay == Overlay::Settings {
-                s.overlay = Overlay::None;
-            }
-        })
+        .on_close(|s: &mut Presenter| s.dismiss(Overlay::Settings))
         .child(
             col()
                 .key("settings-options")

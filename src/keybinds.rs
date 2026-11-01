@@ -33,7 +33,6 @@ macro_rules! actions {
         }
     };
 }
-
 actions! {
     PlayPause => "space",
     Present => "f",
@@ -52,7 +51,34 @@ actions! {
     Close => "escape",
 }
 
+/// The actions that only move the clip. Every one of them is carried out by the control window
+/// whatever asked for it, and none of them needs the control window itself.
+impl Action {
+    pub fn is_transport(self) -> bool {
+        matches!(
+            self,
+            Self::PlayPause
+                | Self::Mute
+                | Self::Loop
+                | Self::Restart
+                | Self::SeekBack
+                | Self::SeekBackFast
+                | Self::SeekForward
+                | Self::SeekForwardFast
+                | Self::VolumeUp
+                | Self::VolumeDown
+        )
+    }
+
+    /// Transport a window that only shows the picture offers. It has no volume control of its own,
+    /// so the volume keys stay with the control window.
+    pub fn in_projector(self) -> bool {
+        self.is_transport() && !matches!(self, Self::VolumeUp | Self::VolumeDown)
+    }
+}
+
 /// The chord each action answers to.
+#[derive(Clone)]
 pub struct Keybinds {
     chords: BTreeMap<Action, Shortcut>,
 }

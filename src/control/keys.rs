@@ -16,7 +16,7 @@ pub fn presenter_key(s: &mut Presenter, event: &KeyEvent, tx: &mut Tx) -> bool {
         if action != Action::Close {
             return false;
         }
-        s.overlay = Overlay::None;
+        s.dismiss(Overlay::Settings);
         return true;
     }
     s.perform(action, tx)

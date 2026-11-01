@@ -43,8 +43,9 @@ pub struct Tools {
 }
 
 impl Tools {
-    /// Search order: `VIDSHOW_FFMPEG` (a directory or the ffmpeg binary), next to vidshow.exe,
-    /// `bin` beside it, then `PATH`. ffprobe is expected beside ffmpeg.
+    /// Search order: `VIDSHOW_FFMPEG` (a directory or the ffmpeg binary), then `ffmpeg\`,
+    /// `ffmpeg\bin\`, `bin\` and the exe's own folder, then `PATH`. ffprobe is expected beside
+    /// ffmpeg.
     pub fn discover() -> Result<Self, String> {
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut direct: Option<PathBuf> = None;
@@ -93,12 +94,12 @@ impl Tools {
     }
 }
 
-/// The frame rate, held as both ffmpeg's `-r` argument and the number it means.
+/// The frame rate, held as both ffmpeg's `-r` argument and the number it means. Only
+/// [`FrameRate::new`] builds one, so the two can never describe different rates.
 #[derive(Clone, Debug)]
 pub struct FrameRate {
-    /// Exactly what ffmpeg is told, so index-based timing matches its output.
-    pub arg: String,
-    pub value: f64,
+    arg: String,
+    value: f64,
 }
 
 impl Default for FrameRate {
@@ -118,6 +119,64 @@ impl FrameRate {
             .contains(&value)
             .then_some(Self { arg, value })
     }
+
+    /// Exactly what ffmpeg is told, so index-based timing matches its output.
+    pub fn arg(&self) -> &str {
+        &self.arg
+    }
+
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+}
+
+/// How far the picture is turned to stand upright. Only quarter turns are ever applied, so a
+/// display matrix that says anything else is no rotation at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Rotation {
+    #[default]
+    None,
+    Cw90,
+    Cw180,
+    Cw270,
+}
+
+impl Rotation {
+    /// From ffprobe's display matrix, whose rotation is counter-clockwise degrees.
+    fn from_display_matrix(degrees: f64) -> Self {
+        let clockwise = (360.0 - degrees.round()).rem_euclid(360.0) as i64;
+        match clockwise {
+            90 => Self::Cw90,
+            180 => Self::Cw180,
+            270 => Self::Cw270,
+            _ => Self::None,
+        }
+    }
+
+    /// Whether applying it swaps width and height.
+    fn swaps_dimensions(self) -> bool {
+        matches!(self, Self::Cw90 | Self::Cw270)
+    }
+
+    /// The degrees clockwise, for display.
+    pub fn degrees(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Cw90 => 90,
+            Self::Cw180 => 180,
+            Self::Cw270 => 270,
+        }
+    }
+
+    /// The ffmpeg filter that applies it.
+    fn filter(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Cw90 => Some("transpose=1"),
+            Self::Cw180 => Some("hflip,vflip"),
+            Self::Cw270 => Some("transpose=2"),
+        }
+    }
 }
 
 /// What vidshow needs to know before decoding: how big, how fast and how long.
@@ -125,12 +184,11 @@ impl FrameRate {
 pub struct MediaInfo {
     pub path: PathBuf,
     pub duration: f64,
-    /// Upright dimensions: already swapped for 90°/270° rotation.
+    /// Upright dimensions: already swapped for a quarter turn.
     pub width: u32,
     pub height: u32,
     pub fps: FrameRate,
-    /// Degrees clockwise to apply, 0/90/180/270.
-    pub rotation: i32,
+    pub rotation: Rotation,
     /// Read by the audio back end; platforms without one play silently.
     pub has_audio: bool,
 }
@@ -175,12 +233,6 @@ fn ratio(value: Option<&Value>) -> Option<(String, f64)> {
         return None;
     }
     Some((format!("{}/{den}", num as i64), num / den))
-}
-
-/// Turns the display-matrix rotation ffprobe reports into the clockwise rotation to draw with.
-fn clockwise(rotation: f64) -> i32 {
-    let r = rotation.round() as i64 % 360;
-    (((360 - r) % 360) as i32 / 90 * 90).rem_euclid(360)
 }
 
 pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
@@ -231,8 +283,8 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
                 .as_str()
                 .and_then(|text| text.trim().parse::<f64>().ok())
         })
-        .map(clockwise)
-        .unwrap_or(0);
+        .map(Rotation::from_display_matrix)
+        .unwrap_or_default();
 
     let duration = root["format"]["duration"]
         .as_str()
@@ -246,7 +298,7 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
 
     let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
 
-    let (width, height) = if rotation == 90 || rotation == 270 {
+    let (width, height) = if rotation.swaps_dimensions() {
         (height, width)
     } else {
         (width, height)
@@ -306,6 +358,12 @@ fn spawn_with_stderr(mut command: Command) -> Result<(Child, Stderr), String> {
     Ok((child, log))
 }
 
+/// Stops a decoder process and reaps it, so the next pass can start at once.
+pub fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// The options both decoders share: quiet, seeking before the input, and no subtitle or data
 /// streams. `input` holds the input options the caller needs, which ffmpeg wants before `-i`.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -327,15 +385,12 @@ pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child
     // applied here instead.
     let mut command = decoder(tools, info, start, &["-noautorotate"]);
     command.args(["-map", "0:v:0", "-an"]);
-    match info.rotation {
-        90 => command.args(["-vf", "transpose=1"]),
-        180 => command.args(["-vf", "hflip,vflip"]),
-        270 => command.args(["-vf", "transpose=2"]),
-        _ => &mut command,
-    };
+    if let Some(filter) = info.rotation.filter() {
+        command.args(["-vf", filter]);
+    }
     command.args([
         "-r",
-        &info.fps.arg,
+        info.fps.arg(),
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -386,12 +441,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rotation_becomes_clockwise_degrees() {
-        assert_eq!(clockwise(-90.0), 90);
-        assert_eq!(clockwise(90.0), 270);
-        assert_eq!(clockwise(180.0), 180);
-        assert_eq!(clockwise(0.0), 0);
-        assert_eq!(clockwise(-270.0), 270);
+    fn rotation_becomes_clockwise_quarter_turns() {
+        use Rotation::{Cw90, Cw180, Cw270};
+        assert_eq!(Rotation::from_display_matrix(-90.0), Cw90);
+        assert_eq!(Rotation::from_display_matrix(90.0), Cw270);
+        assert_eq!(Rotation::from_display_matrix(180.0), Cw180);
+        assert_eq!(Rotation::from_display_matrix(0.0), Rotation::None);
+        assert_eq!(Rotation::from_display_matrix(-270.0), Cw270);
+        // A rotation that is not a quarter turn cannot be applied to the frame size.
+        assert_eq!(Rotation::from_display_matrix(45.0), Rotation::None);
+        assert_eq!(Cw90.degrees(), 90);
     }
 
     /// The real command line, against a real ffmpeg: probe a generated clip, then decode a frame
@@ -429,16 +488,16 @@ mod tests {
         let info = probe(&tools, &clip).unwrap();
         assert_eq!((info.width, info.height), (320, 240));
         assert!(
-            (info.fps.value - 25.0).abs() < 0.1,
+            (info.fps.value() - 25.0).abs() < 0.1,
             "fps {}",
-            info.fps.value
+            info.fps.value()
         );
         assert!(
             (info.duration - 2.0).abs() < 0.4,
             "duration {}",
             info.duration
         );
-        assert_eq!(info.rotation, 0);
+        assert_eq!(info.rotation, Rotation::None);
 
         let (mut child, _log) = spawn_video(&tools, &info, 0.0).unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
@@ -485,8 +544,8 @@ mod tests {
         let value = serde_json::json!("30000/1001");
         let (arg, fps) = ratio(Some(&value)).unwrap();
         let rate = FrameRate::new(arg, fps).unwrap();
-        assert_eq!(rate.arg, "30000/1001");
-        assert!((rate.value - 29.97).abs() < 0.01);
+        assert_eq!(rate.arg(), "30000/1001");
+        assert!((rate.value() - 29.97).abs() < 0.01);
         assert!(ratio(Some(&serde_json::json!("0/0"))).is_none());
         // A rate nothing can be paced against is refused, so arg and value stay in agreement.
         assert!(FrameRate::new("100000/1".to_string(), 100_000.0).is_none());

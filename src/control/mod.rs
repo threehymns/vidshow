@@ -11,8 +11,9 @@ mod view;
 pub use keys::presenter_key;
 pub use view::presenter_view;
 
+use crate::cli::Startup;
 use crate::keybinds::{Action, Keybinds};
-use crate::media::Tools;
+use crate::media::{Rotation, Tools};
 use crate::player::{Player, State, Wakers};
 use crate::projection::Projector;
 use crate::settings::{DisplayKey, Settings, TargetDisplay};
@@ -29,7 +30,6 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
 
 /// The control window's one open file.
 pub enum Clip {
-    /// Nothing loaded yet.
     None,
     /// The file could not be opened, and why.
     Failed(String),
@@ -65,60 +65,18 @@ pub enum Overlay {
     Settings,
 }
 
-/// What the command line asked for, applied once the window exists.
-#[derive(Clone, Debug)]
-pub struct Startup {
-    pub file: Option<PathBuf>,
-    pub present: bool,
-    pub autoplay: bool,
-    /// A part of the command line vidshow could not follow, for the window to say.
-    pub problem: Option<String>,
-}
-
-impl Startup {
-    /// Reads the arguments rune left us; the rest is the file Explorer (or a shell) passed us.
-    pub fn parse(args: &[String]) -> Self {
-        let mut startup = Self {
-            file: None,
-            present: false,
-            autoplay: true,
-            problem: None,
-        };
-        for arg in args {
-            match arg.as_str() {
-                "--present" => startup.present = true,
-                "--no-play" => startup.autoplay = false,
-                other if other.starts_with('-') => {
-                    startup.problem = Some(format!("vidshow has no option {other}"));
-                }
-                other => {
-                    let path = PathBuf::from(other);
-                    if !path.is_file() {
-                        startup.problem = Some(format!("{other} is not a file"));
-                    } else if startup.file.is_none() {
-                        startup.file = Some(path);
-                    }
-                }
-            }
-        }
-        startup
-    }
-}
-
 /// The control window.
 pub struct Presenter {
     pub tools: Result<Tools, String>,
-    /// The shortcut table this window answers to.
     pub keybinds: Keybinds,
     pub clip: Clip,
     pub cfg: Settings,
     pub displays: Vec<Display>,
     pub overlay: Overlay,
-    pub presenting: bool,
     pub projection: Projector,
     pub wakers: Arc<Wakers>,
-    /// A problem to show in the window: a save that failed, an unreadable settings file, an
-    /// argument vidshow could not follow.
+    /// The latest problem the window itself knows about: a save that failed, an unreadable settings
+    /// file, an argument vidshow could not follow. The clip's own errors are read from the clip.
     pub notice: Option<String>,
     /// A file from the command line, opened once the event loop is up.
     pub startup: Option<Startup>,
@@ -147,13 +105,16 @@ impl Presenter {
                 self.toggle_cursor();
                 true
             }
-            other => self.perform_playback(other),
+            transport => self.perform_playback(transport),
         }
     }
 
-    /// Runs an action that only moves playback, which the projector's window can ask for too.
+    /// Runs an action that only moves the clip, which the projector's window can ask for too.
     /// Returns false for the actions that need the control window itself.
     pub fn perform_playback(&mut self, action: Action) -> bool {
+        if !action.is_transport() {
+            return false;
+        }
         match action {
             Action::PlayPause => self.toggle_playing(),
             Action::Mute => self.toggle_mute(),
@@ -165,18 +126,22 @@ impl Presenter {
             Action::SeekForwardFast => self.seek_by(30.0),
             Action::VolumeUp => self.change_volume(0.05),
             Action::VolumeDown => self.change_volume(-0.05),
-            Action::Present | Action::Preview | Action::Cursor | Action::Open | Action::Close => {
-                return false;
-            }
+            _ => return false,
         }
         true
     }
 
-    pub fn open(&mut self, path: PathBuf) {
-        self.load(path, true);
+    /// Opens a file in place of the clip that was there, and plays it.
+    pub fn load(&mut self, path: PathBuf) {
+        self.load_with(path, true);
     }
 
-    fn load(&mut self, path: PathBuf, autoplay: bool) {
+    /// Opens a file for `--no-play`, which waits on its first frame.
+    pub fn load_paused(&mut self, path: PathBuf) {
+        self.load_with(path, false);
+    }
+
+    fn load_with(&mut self, path: PathBuf, autoplay: bool) {
         // Drops the previous clip first: that stops its decoder and audio threads.
         self.clip = Clip::None;
         self.notice = None;
@@ -255,7 +220,7 @@ impl Presenter {
     }
 
     pub fn toggle_present(&mut self) {
-        if self.presenting {
+        if self.projection.is_presenting() {
             self.stop_presenting();
         } else {
             self.start_presenting();
@@ -269,7 +234,6 @@ impl Presenter {
         };
         let display = self.displays[index].clone();
         self.projection.show(&display);
-        self.presenting = true;
         self.notice = None;
         // Presenting a paused clip means showing it.
         if let Some(player) = self.clip.player()
@@ -282,8 +246,24 @@ impl Presenter {
 
     pub fn stop_presenting(&mut self) {
         self.projection.hide();
-        self.presenting = false;
         self.apply();
+    }
+
+    /// Closes `overlay` if it is the one up, so a dismissal that arrives late cannot close a panel
+    /// opened since.
+    pub fn dismiss(&mut self, overlay: Overlay) {
+        if self.overlay == overlay {
+            self.overlay = Overlay::None;
+        }
+    }
+
+    /// Opens the display picker, or closes it when it is already open.
+    pub fn toggle_display_picker(&mut self) {
+        self.overlay = if self.overlay == Overlay::DisplayPicker || self.displays.is_empty() {
+            Overlay::None
+        } else {
+            Overlay::DisplayPicker
+        };
     }
 
     fn choose_display(&mut self, index: usize) {
@@ -296,7 +276,8 @@ impl Presenter {
             TargetDisplay::Display(DisplayKey::of(display))
         };
         self.overlay = Overlay::None;
-        if self.presenting {
+        if self.projection.is_presenting() {
+            // The picture has to move to the display that was just chosen.
             self.start_presenting();
         } else {
             self.apply();
@@ -331,10 +312,10 @@ impl Presenter {
         let player = self.clip.player()?;
         let mut parts = vec![
             format!("{}\u{d7}{}", player.info.width, player.info.height),
-            format!("{:.2} fps", player.info.fps.value),
+            format!("{:.2} fps", player.info.fps.value()),
         ];
-        if player.info.rotation != 0 {
-            parts.push(format!("rotated {}°", player.info.rotation));
+        if player.info.rotation != Rotation::None {
+            parts.push(format!("rotated {}°", player.info.rotation.degrees()));
         }
         if let Some(note) = player.audio_note() {
             parts.push(note);
@@ -343,11 +324,13 @@ impl Presenter {
     }
 
     /// The one thing wrong to show: the latest notice, then the clip, then a missing ffmpeg.
-    fn problem(&self) -> Option<&str> {
+    fn problem(&self) -> Option<String> {
         self.notice
-            .as_deref()
-            .or_else(|| self.clip.error())
-            .or_else(|| self.tools.as_ref().err().map(String::as_str))
+            .clone()
+            .or_else(|| self.clip.error().map(str::to_string))
+            // A decode that failed after the clip opened never becomes a `Clip::Failed`.
+            .or_else(|| self.clip.player().and_then(|player| player.error()))
+            .or_else(|| self.tools.as_ref().err().cloned())
     }
 
     /// Pushes the settings onto the clip and the projector, and saves them. Every control ends
@@ -359,7 +342,7 @@ impl Presenter {
             player.set_muted(self.cfg.muted);
             player.set_volume(self.cfg.volume);
             player.set_preview(self.cfg.preview);
-            player.set_presenting(self.presenting);
+            player.set_presenting(self.projection.is_presenting());
         }
         self.projection.set_always_on_top(self.cfg.always_on_top);
         self.projection
@@ -381,7 +364,7 @@ impl Presenter {
                 self.overlay = Overlay::None;
                 true
             }
-            Overlay::None if self.presenting => {
+            Overlay::None if self.projection.is_presenting() => {
                 self.stop_presenting();
                 true
             }
@@ -406,7 +389,7 @@ impl Presenter {
             ],
         };
         tx.open_file(options, |s: &mut Presenter, result, _tx| match result {
-            Ok(Some(path)) => s.open(path),
+            Ok(Some(path)) => s.load(path),
             Ok(None) => {}
             Err(error) => s.notice = Some(format!("the file dialog failed: {}", error.0)),
         });
@@ -432,7 +415,11 @@ pub fn presenter_setup(s: &mut Presenter, waker: rune::Waker) {
         s.notice = Some(problem);
     }
     if let Some(path) = startup.file {
-        s.load(path, startup.autoplay);
+        if startup.autoplay {
+            s.load(path);
+        } else {
+            s.load_paused(path);
+        }
     }
     if startup.present {
         s.start_presenting();

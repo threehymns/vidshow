@@ -4,7 +4,7 @@
 //! [`Outcome`] that says what to do next, so the loop's state is named rather than carried in
 //! loose flags.
 
-use super::{Inner, State};
+use super::Inner;
 use crate::media::{self, MediaInfo, Tools};
 use std::io::BufReader;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub(super) fn decode_loop(inner: Arc<Inner>, tools: Tools, info: MediaInfo) {
             }
             Ok(Outcome::Done) => return,
             Err(error) => {
-                inner.set_state(State::Failed(error));
+                inner.fail(error);
                 return;
             }
         }
@@ -77,8 +77,7 @@ fn run_pass(
 ) -> Result<Outcome, String> {
     let (mut child, log) = media::spawn_video(tools, info, pass.start)?;
     let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        media::reap(&mut child);
         return Err("ffmpeg gave no output".into());
     };
     inner.set_video_process(child);
@@ -113,7 +112,7 @@ fn run_pass(
             }
         }
 
-        let pts = pass.start + pass.index as f64 / info.fps.value;
+        let pts = pass.start + pass.index as f64 / info.fps.value();
         pass.index += 1;
         match due(inner, pass, pts) {
             Due::Show => {}
@@ -123,7 +122,6 @@ fn run_pass(
         }
         inner.publish(frame);
         pass.force_first = false;
-        inner.promote();
     }
 }
 
@@ -162,7 +160,7 @@ fn end_of_stream(inner: &Inner) -> Outcome {
         return Outcome::Done;
     }
     if inner.looping() {
-        inner.rewind();
+        inner.restart();
         return Outcome::Restart;
     }
     inner.finish();

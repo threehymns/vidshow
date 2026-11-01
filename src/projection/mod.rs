@@ -1,11 +1,9 @@
 //! The projector: the window or overlay that shows the picture on the display you chose.
 //!
-//! The control window has every control; the projector covers its display exactly and shows
-//! nothing but the picture — the same shape of thing as PowerPoint's presenter output or an OBS
-//! projector, without exclusive full screen mode. It is a window wherever a window can be placed
-//! (Windows, X11, macOS); on Wayland, which gives clients no say in where a window goes, it is a
-//! layer-shell overlay pinned to the chosen output instead. [`Projector`] is the only code that
-//! knows which of the two it is.
+//! The control window has every control; this covers its display exactly and shows nothing but the
+//! picture. It is a window wherever a window can be placed, and on Wayland, which gives clients no
+//! say in where a window goes, a layer-shell overlay pinned to the chosen output. [`Projector`] is
+//! the only code that knows which of the two it is, and the only owner of "the picture is up".
 
 mod keys;
 mod view;
@@ -33,7 +31,7 @@ pub enum Event {
 /// they are built.
 pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
 
-/// The projector's state.
+/// The projector's window state, pushed by the control window on every change.
 pub struct Projection {
     pub player: Option<Arc<Player>>,
     pub fit: FitMode,
@@ -41,12 +39,10 @@ pub struct Projection {
     /// Reports back rather than reaching into the control window.
     pub notify: Notify,
     pub wakers: Arc<Wakers>,
-    /// The shortcut table this window answers to.
     pub keybinds: Keybinds,
 }
 
 impl Projection {
-    /// Takes on the clip and presentation options the control window currently has.
     pub fn apply(&mut self, player: Option<Arc<Player>>, fit: FitMode, hide_cursor: bool) {
         self.player = player;
         self.fit = fit;
@@ -76,8 +72,14 @@ pub fn display_target(display: &Display) -> DisplayTarget {
     }
 }
 
-/// Where the picture goes. The two variants are the whole of vidshow's platform difference.
-pub enum Projector {
+/// Where the picture goes. The two targets are the whole of vidshow's platform difference, and
+/// `presenting` is the one fact behind it, so no caller has to keep its own copy.
+pub struct Projector {
+    target: Target,
+    presenting: bool,
+}
+
+enum Target {
     Window {
         handle: WindowHandle,
         state: AppHandle<Projection>,
@@ -87,17 +89,28 @@ pub enum Projector {
 
 impl Projector {
     pub fn window(handle: WindowHandle, state: AppHandle<Projection>) -> Self {
-        Self::Window { handle, state }
+        Self {
+            target: Target::Window { handle, state },
+            presenting: false,
+        }
     }
 
     pub fn overlay(handle: OverlayHandle<Projection>) -> Self {
-        Self::Overlay(handle)
+        Self {
+            target: Target::Overlay(handle),
+            presenting: false,
+        }
+    }
+
+    /// Whether the picture is up on the chosen display.
+    pub fn is_presenting(&self) -> bool {
+        self.presenting
     }
 
     /// Show the picture on `display`, covering it whole.
-    pub(crate) fn show(&self, display: &Display) {
-        match self {
-            Self::Window { handle, .. } => {
+    pub(crate) fn show(&mut self, display: &Display) {
+        match &self.target {
+            Target::Window { handle, .. } => {
                 // The size follows the display chosen while presenting; where `place` also sizes
                 // windows it asks for the same rectangle. No exclusive full screen, so alt-tab,
                 // notifications and screen sharing behave normally.
@@ -105,34 +118,36 @@ impl Projector {
                 handle.place(display_target(display), OverlayPlacement::FullScreen);
                 handle.open();
             }
-            Self::Overlay(handle) => {
+            Target::Overlay(handle) => {
                 handle.set_display(display_target(display));
                 handle.show();
             }
         }
+        self.presenting = true;
     }
 
-    pub(crate) fn hide(&self) {
-        match self {
-            Self::Window { handle, .. } => handle.hide(),
-            Self::Overlay(handle) => handle.hide(),
+    pub(crate) fn hide(&mut self) {
+        match &self.target {
+            Target::Window { handle, .. } => handle.hide(),
+            Target::Overlay(handle) => handle.hide(),
         }
+        self.presenting = false;
     }
 
     /// `On top` for the window. A layer-shell overlay already sits above ordinary windows.
     pub(crate) fn set_always_on_top(&self, on: bool) {
-        if let Self::Window { handle, .. } = self {
+        if let Target::Window { handle, .. } = &self.target {
             handle.set_always_on_top(on);
         }
     }
 
     /// Push the current clip, fit and cursor policy to the projector.
     pub(crate) fn sync(&self, player: Option<Arc<Player>>, fit: FitMode, hide_cursor: bool) {
-        match self {
-            Self::Window { state, .. } => {
+        match &self.target {
+            Target::Window { state, .. } => {
                 state.update(move |projection, _| projection.apply(player, fit, hide_cursor))
             }
-            Self::Overlay(handle) => {
+            Target::Overlay(handle) => {
                 handle.update(move |projection, _| projection.apply(player, fit, hide_cursor))
             }
         }

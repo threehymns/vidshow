@@ -69,11 +69,12 @@ impl DisplayKey {
 
     /// Whether two keys describe the same monitor in the same place at the same resolution.
     fn same_as(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.width == other.width
-            && self.height == other.height
-            && self.x == other.x
-            && self.y == other.y
+        self.name == other.name && self.x == other.x && self.y == other.y && self.same_screen(other)
+    }
+
+    /// Whether two keys describe a monitor of the same size playing the same role.
+    fn same_screen(&self, other: &Self) -> bool {
+        self.width == other.width && self.height == other.height && self.primary == other.primary
     }
 }
 
@@ -229,13 +230,7 @@ impl Settings {
                         keys.iter().position(|key| key.name.as_ref() == Some(name))
                     })
                 })
-                .or_else(|| {
-                    keys.iter().position(|key| {
-                        key.width == want.width
-                            && key.height == want.height
-                            && key.primary == want.primary
-                    })
-                })
+                .or_else(|| keys.iter().position(|key| key.same_screen(want)))
                 .or_else(|| keys.iter().position(|key| key.primary))
                 .or(Some(0)),
         }

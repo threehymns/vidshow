@@ -1,9 +1,8 @@
 //! Audio output for the presentation.
 //!
-//! Video goes through Rune's `NativeSurface`; sound has no Rune element to play it (Rune's own
-//! `Player` is macOS-only), so vidshow runs a second ffmpeg for the audio track and feeds the
-//! samples to the default output device through cpal — WASAPI on Windows, ALSA on Linux. Any
-//! failure here is reported as a note in the control window: losing sound never stops the picture.
+//! Rune has no element that plays sound, so vidshow runs a second ffmpeg for the audio track and
+//! feeds the samples to the default output device through cpal. Any failure here is recorded as a
+//! note for the control window: losing sound never stops the picture.
 
 #[cfg(any(windows, target_os = "linux"))]
 mod imp {
@@ -54,8 +53,7 @@ mod imp {
             if let Ok(mut process) = self.process.lock()
                 && let Some(mut child) = process.take()
             {
-                let _ = child.kill();
-                let _ = child.wait();
+                media::reap(&mut child);
             }
         }
 

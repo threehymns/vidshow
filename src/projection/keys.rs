@@ -16,24 +16,9 @@ pub fn projection_key(p: &mut Projection, event: &KeyEvent, tx: &mut Tx) -> bool
         tx.close_window();
         return true;
     }
-    if !moves_playback(action) {
+    if !action.in_projector() {
         return false;
     }
     (p.notify)(Event::Action(action));
     true
-}
-
-/// The actions a window that only shows the picture offers.
-fn moves_playback(action: Action) -> bool {
-    matches!(
-        action,
-        Action::PlayPause
-            | Action::Mute
-            | Action::Loop
-            | Action::Restart
-            | Action::SeekBack
-            | Action::SeekBackFast
-            | Action::SeekForward
-            | Action::SeekForwardFast
-    )
 }

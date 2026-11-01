@@ -178,7 +178,7 @@ sample-aspect-ratio files (old anamorphic content) are not un-squeezed.
   says why.
 - `src/media.rs` finds ffmpeg and builds the commands, `src/player/` is the clock and the decode
   thread, `src/control/` the control window, `src/projection/` the projector, `src/settings.rs`
-  the saved state, `src/audio.rs` the sound.
+  the saved state, `src/cli.rs` the command line, `src/audio.rs` the sound.
 
 ## Limits
 
