@@ -118,7 +118,10 @@ impl Settings {
     /// `vidshow.portable` marker sits beside the exe, in which case `settings.json` is kept
     /// there so the whole folder can move between machines.
     pub fn file() -> Option<PathBuf> {
-        if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        {
             if dir.join("vidshow.portable").is_file() {
                 return Some(dir.join("settings.json"));
             }
@@ -132,12 +135,21 @@ impl Settings {
         if let Some(config) = std::env::var_os("XDG_CONFIG_HOME") {
             return Some(PathBuf::from(config).join("vidshow").join("settings.json"));
         }
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config").join("vidshow").join("settings.json"))
+        std::env::var_os("HOME").map(|home| {
+            PathBuf::from(home)
+                .join(".config")
+                .join("vidshow")
+                .join("settings.json")
+        })
     }
 
     pub fn load() -> Self {
-        let Some(path) = Self::file() else { return Self::default() };
-        let Ok(bytes) = std::fs::read(&path) else { return Self::default() };
+        let Some(path) = Self::file() else {
+            return Self::default();
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return Self::default();
+        };
         serde_json::from_slice(&bytes).unwrap_or_default()
     }
 
@@ -146,7 +158,9 @@ impl Settings {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let Ok(json) = serde_json::to_vec_pretty(self) else { return };
+        let Ok(json) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
         let _ = std::fs::write(path, json);
     }
 
@@ -171,17 +185,27 @@ impl Settings {
                     .iter()
                     .position(|d| {
                         let k = DisplayKey::of(d);
-                        k.name == key.name && k.width == key.width && k.height == key.height && k.x == key.x && k.y == key.y
+                        k.name == key.name
+                            && k.width == key.width
+                            && k.height == key.height
+                            && k.x == key.x
+                            && k.y == key.y
                     })
                     // An unplugged or rearranged display: keep the same screen if it is still here.
-                    .or_else(|| displays.iter().position(|d| {
-                        let k = DisplayKey::of(d);
-                        key.name.is_some() && k.name == key.name
-                    }))
-                    .or_else(|| displays.iter().position(|d| {
-                        let k = DisplayKey::of(d);
-                        k.width == key.width && k.height == key.height && k.primary == key.primary
-                    }))
+                    .or_else(|| {
+                        displays.iter().position(|d| {
+                            let k = DisplayKey::of(d);
+                            key.name.is_some() && k.name == key.name
+                        })
+                    })
+                    .or_else(|| {
+                        displays.iter().position(|d| {
+                            let k = DisplayKey::of(d);
+                            k.width == key.width
+                                && k.height == key.height
+                                && k.primary == key.primary
+                        })
+                    })
                     .or_else(|| displays.iter().position(|d| d.primary))
                     .unwrap_or(0),
             ),
@@ -211,8 +235,22 @@ mod tests {
     fn secondary_prefers_a_non_primary_display() {
         let settings = Settings::default();
         let displays = vec![
-            rune::Display { id: None, name: Some("A".into()), position: (0, 0), size: (2560, 1440), scale: 1.0, primary: true },
-            rune::Display { id: None, name: Some("B".into()), position: (2560, 0), size: (1920, 1080), scale: 1.0, primary: false },
+            rune::Display {
+                id: None,
+                name: Some("A".into()),
+                position: (0, 0),
+                size: (2560, 1440),
+                scale: 1.0,
+                primary: true,
+            },
+            rune::Display {
+                id: None,
+                name: Some("B".into()),
+                position: (2560, 0),
+                size: (1920, 1080),
+                scale: 1.0,
+                primary: false,
+            },
         ];
         assert_eq!(settings.resolve(&displays), Some(1));
     }
@@ -220,8 +258,22 @@ mod tests {
     #[test]
     fn a_saved_display_follows_its_identity() {
         let displays = vec![
-            rune::Display { id: None, name: Some("A".into()), position: (0, 0), size: (2560, 1440), scale: 1.0, primary: true },
-            rune::Display { id: None, name: Some("B".into()), position: (2560, 0), size: (1920, 1080), scale: 1.0, primary: false },
+            rune::Display {
+                id: None,
+                name: Some("A".into()),
+                position: (0, 0),
+                size: (2560, 1440),
+                scale: 1.0,
+                primary: true,
+            },
+            rune::Display {
+                id: None,
+                name: Some("B".into()),
+                position: (2560, 0),
+                size: (1920, 1080),
+                scale: 1.0,
+                primary: false,
+            },
         ];
         let mut settings = Settings::default();
         settings.display = TargetDisplay::Display(DisplayKey::of(&displays[0]));
@@ -239,7 +291,14 @@ mod tests {
     fn round_trips_through_json() {
         let mut settings = Settings::default();
         settings.fit = FitMode::Fill;
-        settings.display = TargetDisplay::Display(DisplayKey { name: Some("DISPLAY2".into()), width: 1920, height: 1080, x: 1920, y: 0, primary: false });
+        settings.display = TargetDisplay::Display(DisplayKey {
+            name: Some("DISPLAY2".into()),
+            width: 1920,
+            height: 1080,
+            x: 1920,
+            y: 0,
+            primary: false,
+        });
         let json = serde_json::to_string(&settings).unwrap();
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.fit, FitMode::Fill);

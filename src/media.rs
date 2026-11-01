@@ -56,7 +56,10 @@ impl Tools {
                 dirs.push(path);
             }
         }
-        if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        {
             dirs.push(dir.join("ffmpeg"));
             dirs.push(dir.join("ffmpeg").join("bin"));
             dirs.push(dir.join("bin"));
@@ -76,7 +79,11 @@ impl Tools {
                 return Ok(Self { ffmpeg, ffprobe });
             }
         }
-        let tried: Vec<String> = dirs.iter().take(4).map(|d| d.display().to_string()).collect();
+        let tried: Vec<String> = dirs
+            .iter()
+            .take(4)
+            .map(|d| d.display().to_string())
+            .collect();
         Err(format!(
             "ffmpeg and ffprobe were not found. Put ffmpeg.exe and ffprobe.exe beside vidshow.exe \
              (or in a bin folder beside it), add them to PATH, or set VIDSHOW_FFMPEG to their \
@@ -119,8 +126,15 @@ fn run_json(program: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("can't run {}: {e}", program.display()))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
-        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
-        return Err(format!("{} couldn't read this file: {line}", program.display()));
+        let line = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("unknown error");
+        return Err(format!(
+            "{} couldn't read this file: {line}",
+            program.display()
+        ));
     }
     Ok(output.stdout)
 }
@@ -145,14 +159,26 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
     let path_str = path.to_string_lossy().into_owned();
     let json = run_json(
         &tools.ffprobe,
-        &["-v", "error", "-print_format", "json", "-show_format", "-show_streams", &path_str],
+        &[
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            &path_str,
+        ],
     )?;
-    let root: Value = serde_json::from_slice(&json).map_err(|e| format!("can't read ffprobe's answer: {e}"))?;
+    let root: Value =
+        serde_json::from_slice(&json).map_err(|e| format!("can't read ffprobe's answer: {e}"))?;
     let streams = root["streams"].as_array().cloned().unwrap_or_default();
 
     let video = streams
         .iter()
-        .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64().unwrap_or(0) == 0)
+        .find(|s| {
+            s["codec_type"] == "video"
+                && s["disposition"]["attached_pic"].as_i64().unwrap_or(0) == 0
+        })
         .ok_or_else(|| format!("{} has no video stream", title_of(path)))?;
     let width = video["width"].as_u64().unwrap_or(0) as u32;
     let height = video["height"].as_u64().unwrap_or(0) as u32;
@@ -168,20 +194,35 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
     let rotation = video
         .get("side_data_list")
         .and_then(|list| list.as_array())
-        .and_then(|list| list.iter().find_map(|entry| entry.get("rotation").and_then(Value::as_f64)))
-        .or_else(|| video["tags"]["rotate"].as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+        .and_then(|list| {
+            list.iter()
+                .find_map(|entry| entry.get("rotation").and_then(Value::as_f64))
+        })
+        .or_else(|| {
+            video["tags"]["rotate"]
+                .as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })
         .map(clockwise)
         .unwrap_or(0);
 
     let duration = root["format"]["duration"]
         .as_str()
         .and_then(|d| d.parse::<f64>().ok())
-        .or_else(|| video["duration"].as_str().and_then(|d| d.parse::<f64>().ok()))
+        .or_else(|| {
+            video["duration"]
+                .as_str()
+                .and_then(|d| d.parse::<f64>().ok())
+        })
         .unwrap_or(0.0);
 
     let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
 
-    let (width, height) = if rotation == 90 || rotation == 270 { (height, width) } else { (width, height) };
+    let (width, height) = if rotation == 90 || rotation == 270 {
+        (height, width)
+    } else {
+        (width, height)
+    };
     Ok(MediaInfo {
         path: path.to_path_buf(),
         title: title_of(path),
@@ -196,7 +237,10 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
 }
 
 fn title_of(path: &Path) -> String {
-    path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// The last few lines ffmpeg wrote to stderr, for error messages when it exits early.
@@ -222,8 +266,13 @@ fn drain_stderr(stderr: std::process::ChildStderr) -> Stderr {
 }
 
 fn spawn_with_stderr(mut command: Command) -> Result<(Child, Stderr), String> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|e| format!("can't start ffmpeg: {e}"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("can't start ffmpeg: {e}"))?;
     let log = match child.stderr.take() {
         Some(stderr) => drain_stderr(stderr),
         None => Arc::new(Mutex::new(String::new())),
@@ -247,7 +296,13 @@ pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child
     let mut command = command(&tools.ffmpeg);
     // Autorotate is off so the output size is exactly what `probe` computed; the rotation is
     // applied here instead.
-    command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-noautorotate"]);
+    command.args([
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-noautorotate",
+    ]);
     if start > 0.05 {
         command.arg("-ss").arg(format!("{start:.3}"));
     }
@@ -262,20 +317,43 @@ pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child
     if let Some(filter) = filter {
         command.args(["-vf", filter]);
     }
-    command.args(["-r", &info.fps_arg, "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"]);
+    command.args([
+        "-r",
+        &info.fps_arg,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgra",
+        "pipe:1",
+    ]);
     spawn_with_stderr(command)
 }
 
 /// Starts decoding the first audio track to interleaved f32 PCM at the output device's rate.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-pub fn spawn_audio(tools: &Tools, info: &MediaInfo, start: f64, rate: u32, channels: u16) -> Result<(Child, Stderr), String> {
+pub fn spawn_audio(
+    tools: &Tools,
+    info: &MediaInfo,
+    start: f64,
+    rate: u32,
+    channels: u16,
+) -> Result<(Child, Stderr), String> {
     let mut command = command(&tools.ffmpeg);
     pipes(
         &mut command,
         info,
         start,
         "0:a:0",
-        &["-vn", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"],
+        &[
+            "-vn",
+            "-ac",
+            &channels.to_string(),
+            "-ar",
+            &rate.to_string(),
+            "-f",
+            "f32le",
+            "pipe:1",
+        ],
     );
     spawn_with_stderr(command)
 }
@@ -325,9 +403,19 @@ mod tests {
         let clip = dir.join("clip.mp4");
         let made = command(&tools.ffmpeg)
             .args([
-                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "2",
-                "-pix_fmt", "yuv420p",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x240:rate=25",
+                "-t",
+                "2",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&clip)
             .status()
@@ -337,14 +425,24 @@ mod tests {
         let info = probe(&tools, &clip).unwrap();
         assert_eq!((info.width, info.height), (320, 240));
         assert!((info.fps - 25.0).abs() < 0.1, "fps {}", info.fps);
-        assert!((info.duration - 2.0).abs() < 0.4, "duration {}", info.duration);
+        assert!(
+            (info.duration - 2.0).abs() < 0.4,
+            "duration {}",
+            info.duration
+        );
         assert_eq!(info.rotation, 0);
 
         let (mut child, _log) = spawn_video(&tools, &info, 0.0).unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
         let mut frame = vec![0u8; info.frame_bytes()];
-        assert!(read_frame(&mut reader, &mut frame).unwrap(), "a frame arrives");
-        assert!(frame.iter().any(|byte| *byte != 0), "testsrc has colour in it");
+        assert!(
+            read_frame(&mut reader, &mut frame).unwrap(),
+            "a frame arrives"
+        );
+        assert!(
+            frame.iter().any(|byte| *byte != 0),
+            "testsrc has colour in it"
+        );
         let _ = child.kill();
         let _ = child.wait();
 
@@ -352,7 +450,10 @@ mod tests {
         let (mut child, _log) = spawn_video(&tools, &info, 1.0).unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
         let mut frame = vec![0u8; info.frame_bytes()];
-        assert!(read_frame(&mut reader, &mut frame).unwrap(), "a frame after seeking");
+        assert!(
+            read_frame(&mut reader, &mut frame).unwrap(),
+            "a frame after seeking"
+        );
         let _ = child.kill();
         let _ = child.wait();
 
@@ -361,7 +462,10 @@ mod tests {
 
     fn test_tools() -> Option<Tools> {
         let local = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tools");
-        let (ffmpeg, ffprobe) = (local.join(exe_name("ffmpeg")), local.join(exe_name("ffprobe")));
+        let (ffmpeg, ffprobe) = (
+            local.join(exe_name("ffmpeg")),
+            local.join(exe_name("ffprobe")),
+        );
         if ffmpeg.is_file() && ffprobe.is_file() {
             return Some(Tools { ffmpeg, ffprobe });
         }

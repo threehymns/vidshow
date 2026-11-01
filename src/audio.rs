@@ -46,13 +46,21 @@ mod imp {
             if !info.has_audio {
                 return Err("this file has no audio track".into());
             }
-            let ctl = Arc::new(Mutex::new(Ctl { paused: true, seek: None, stop: false }));
+            let ctl = Arc::new(Mutex::new(Ctl {
+                paused: true,
+                seek: None,
+                stop: false,
+            }));
             let gain = Arc::new(AtomicU32::new(1f32.to_bits()));
-            let ring = Arc::new(Mutex::new(Ring { samples: VecDeque::new(), cap: 1 }));
+            let ring = Arc::new(Mutex::new(Ring {
+                samples: VecDeque::new(),
+                cap: 1,
+            }));
             let host_stop = Arc::new(AtomicBool::new(false));
             let (ready_tx, ready_rx) = mpsc::channel();
             let host = {
-                let (ring, ctl, gain, host_stop) = (ring.clone(), ctl.clone(), gain.clone(), host_stop.clone());
+                let (ring, ctl, gain, host_stop) =
+                    (ring.clone(), ctl.clone(), gain.clone(), host_stop.clone());
                 std::thread::spawn(move || host_loop(ready_tx, ring, ctl, gain, host_stop))
             };
             let (rate, channels) = match ready_rx.recv_timeout(Duration::from_secs(8)) {
@@ -73,9 +81,18 @@ mod imp {
             let reader = {
                 let (process, ring, ctl) = (process.clone(), ring.clone(), ctl.clone());
                 let (tools, info) = (tools.clone(), info.clone());
-                std::thread::spawn(move || reader_loop(tools, info, start, rate, channels, ctl, ring, process))
+                std::thread::spawn(move || {
+                    reader_loop(tools, info, start, rate, channels, ctl, ring, process)
+                })
             };
-            Ok(Self { ctl, gain, process, reader: Some(reader), host: Some(host), host_stop })
+            Ok(Self {
+                ctl,
+                gain,
+                process,
+                reader: Some(reader),
+                host: Some(host),
+                host_stop,
+            })
         }
 
         pub fn play(&self) {
@@ -146,7 +163,9 @@ mod imp {
         let supported = match device.default_output_config() {
             Ok(config) => config,
             Err(error) => {
-                let _ = ready.send(Err(format!("the audio device has no output format: {error}")));
+                let _ = ready.send(Err(format!(
+                    "the audio device has no output format: {error}"
+                )));
                 return;
             }
         };
@@ -278,12 +297,17 @@ mod imp {
             // Wait for the device to drain the ring, so ffmpeg is paced by playback rather than
             // decoding the whole track into memory.
             loop {
-                let full = ring.lock().is_ok_and(|ring| ring.samples.len() + 2048 > ring.cap);
+                let full = ring
+                    .lock()
+                    .is_ok_and(|ring| ring.samples.len() + 2048 > ring.cap);
                 if !full {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
-                let (stop, seek) = ctl.lock().map(|c| (c.stop, c.seek.is_some())).unwrap_or((true, false));
+                let (stop, seek) = ctl
+                    .lock()
+                    .map(|c| (c.stop, c.seek.is_some()))
+                    .unwrap_or((true, false));
                 if stop || seek {
                     break;
                 }
@@ -302,7 +326,9 @@ mod imp {
                 Ok(n) => {
                     if let Ok(mut ring) = ring.lock() {
                         for chunk in buffer[..n].chunks_exact(4) {
-                            ring.samples.push_back(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                            ring.samples.push_back(f32::from_le_bytes([
+                                chunk[0], chunk[1], chunk[2], chunk[3],
+                            ]));
                         }
                     }
                 }

@@ -25,8 +25,18 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
     "ts", "m2ts", "mts", "ogv", "ogm", "3gp", "3g2", "vob", "mxf", "divx", "rm", "rmvb", "y4m",
 ];
 
-const STOP: Color = Color { r: 0.80, g: 0.26, b: 0.26, a: 1.0 };
-const DANGER: Color = Color { r: 0.95, g: 0.45, b: 0.42, a: 1.0 };
+const STOP: Color = Color {
+    r: 0.80,
+    g: 0.26,
+    b: 0.26,
+    a: 1.0,
+};
+const DANGER: Color = Color {
+    r: 0.95,
+    g: 0.45,
+    b: 0.42,
+    a: 1.0,
+};
 
 /// The caret on the display picker, drawn as a path so it does not depend on the font's glyphs.
 static CHEVRON_DOWN: Icon = Icon {
@@ -68,8 +78,15 @@ pub struct Projection {
 /// A display's size in points: what window sizes are asked for in, and the size the projector
 /// window follows when you present on a different display.
 pub fn display_points(display: &Display) -> (f32, f32) {
-    let scale = if display.scale > 0.0 { display.scale } else { 1.0 };
-    (display.size.0 as f32 / scale as f32, display.size.1 as f32 / scale as f32)
+    let scale = if display.scale > 0.0 {
+        display.scale
+    } else {
+        1.0
+    };
+    (
+        display.size.0 as f32 / scale as f32,
+        display.size.1 as f32 / scale as f32,
+    )
 }
 
 /// How rune names a display, for placing a surface on it.
@@ -167,7 +184,11 @@ pub fn clock(seconds: f64) -> String {
 fn button(label: impl Into<String>, primary: bool) -> El {
     let theme = tok::theme(true);
     let accent = tok::accent(0, true);
-    let (fill, ink) = if primary { (accent, Color::WHITE) } else { (theme.control_off, theme.text) };
+    let (fill, ink) = if primary {
+        (accent, Color::WHITE)
+    } else {
+        (theme.control_off, theme.text)
+    };
     row()
         .h(32.0)
         .px(13.0)
@@ -187,8 +208,16 @@ fn toggle(label: impl Into<String>, on: bool) -> El {
         .radius(8.0)
         .center_y()
         .cursor(Cursor::Pointer)
-        .fill(if on { accent.alpha(0.9) } else { theme.control_off })
-        .child(text(label).font(type_::LABEL).color(if on { Color::WHITE } else { theme.text_secondary }))
+        .fill(if on {
+            accent.alpha(0.9)
+        } else {
+            theme.control_off
+        })
+        .child(text(label).font(type_::LABEL).color(if on {
+            Color::WHITE
+        } else {
+            theme.text_secondary
+        }))
 }
 
 fn caption(label: impl Into<String>) -> El {
@@ -333,7 +362,9 @@ impl Presenter {
     }
 
     fn choose_display(&mut self, index: usize) {
-        let Some(display) = self.displays.get(index) else { return };
+        let Some(display) = self.displays.get(index) else {
+            return;
+        };
         self.cfg.display = if display.primary {
             TargetDisplay::Primary
         } else {
@@ -347,7 +378,8 @@ impl Presenter {
 
     /// Push the current clip, fit and cursor policy to the projector.
     fn sync_projection(&self) {
-        self.projection.sync(self.player.clone(), self.cfg.fit, self.cfg.hide_cursor);
+        self.projection
+            .sync(self.player.clone(), self.cfg.fit, self.cfg.hide_cursor);
     }
 
     pub fn toggle_present(&mut self) {
@@ -414,7 +446,13 @@ fn pick_file(s: &mut Presenter, tx: &mut Tx) {
         directory: s.cfg.last_dir.clone(),
         file_name: None,
         filters: vec![
-            ("Video".to_string(), VIDEO_EXTENSIONS.iter().map(|ext| (*ext).to_string()).collect()),
+            (
+                "Video".to_string(),
+                VIDEO_EXTENSIONS
+                    .iter()
+                    .map(|ext| (*ext).to_string())
+                    .collect(),
+            ),
             ("All files".to_string(), vec!["*".to_string()]),
         ],
     };
@@ -432,16 +470,14 @@ fn seek_bar(s: &Presenter, duration: f64, progress: f32) -> El {
         .scrub
         .map(|fraction| fraction.clamp(0.0, 1.0))
         .unwrap_or(progress as f64) as f32;
-    el()
-        .key("seek")
+    el().key("seek")
         .w_full()
         .h(18.0)
         .grow(1.0)
         .center_y()
         .cursor(Cursor::Pointer)
         .child(
-            el()
-                .w_full()
+            el().w_full()
                 .h(6.0)
                 .radius(3.0)
                 .fill(theme.control_track)
@@ -468,7 +504,12 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
     let theme = tok::theme(true);
     let accent = tok::accent(0, true);
     let (time, duration, progress, playing) = match &s.player {
-        Some(player) => (player.time(), player.duration(), player.progress(), player.is_playing()),
+        Some(player) => (
+            player.time(),
+            player.duration(),
+            player.progress(),
+            player.is_playing(),
+        ),
         None => (0.0, 0.0, 0.0, false),
     };
     let shown_time = s.scrub.map(|fraction| fraction * duration).unwrap_or(time);
@@ -478,9 +519,10 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .as_ref()
         .map(|player| player.info.title.clone())
         .or_else(|| {
-            s.path
-                .as_ref()
-                .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+            s.path.as_ref().and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
         })
         .unwrap_or_else(|| "Open a video, drop one here, or use Open With".to_string());
 
@@ -490,13 +532,23 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .center_y()
         .w_full()
         .child(text("vidshow").font(type_::TITLE).color(theme.text))
-        .child(text(s.state_label()).font(type_::LABEL).color(if s.presenting { accent } else { theme.text_secondary }))
+        .child(
+            text(s.state_label())
+                .font(type_::LABEL)
+                .color(if s.presenting {
+                    accent
+                } else {
+                    theme.text_secondary
+                }),
+        )
         .child(spacer())
         .child(text(file_name).font(type_::BODY).color(theme.text))
         .child(spacer())
         .child(button("Open…", false).on_press_tx(pick_file))
         .child(if s.presenting {
-            button("Stop presenting", false).fill(STOP).on_press(Presenter::toggle_present)
+            button("Stop presenting", false)
+                .fill(STOP)
+                .on_press(Presenter::toggle_present)
         } else {
             button("Present", true).on_press(Presenter::toggle_present)
         });
@@ -511,8 +563,7 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
             .clip_rounded(10.0)
             .fill(Color::BLACK)
             .child(
-                el()
-                    .key("preview")
+                el().key("preview")
                     .w_full()
                     .h_full()
                     .native_surface(player.preview_surface(), s.cfg.fit.surface()),
@@ -540,9 +591,17 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .gap(10.0)
         .center_y()
         .w_full()
-        .child(text(clock(shown_time)).font(type_::MONO_CAPTION).color(theme.text))
+        .child(
+            text(clock(shown_time))
+                .font(type_::MONO_CAPTION)
+                .color(theme.text),
+        )
         .child(seek_bar(s, duration, progress))
-        .child(text(clock(duration)).font(type_::MONO_CAPTION).color(theme.text_secondary));
+        .child(
+            text(clock(duration))
+                .font(type_::MONO_CAPTION)
+                .color(theme.text_secondary),
+        );
 
     let volume = (s.cfg.volume() * 100.0).round() as i32;
     let transport = row()
@@ -551,9 +610,7 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .w_full()
         .child(button("Restart", false).on_press(Presenter::restart))
         .child(button("−10s", false).on_press(|s: &mut Presenter| s.seek_by(-10.0)))
-        .child(
-            button(if playing { "Pause" } else { "Play" }, true).on_press(Presenter::play_pause),
-        )
+        .child(button(if playing { "Pause" } else { "Play" }, true).on_press(Presenter::play_pause))
         .child(button("+10s", false).on_press(|s: &mut Presenter| s.seek_by(10.0)))
         .child(spacer())
         .child(toggle("Loop", s.cfg.looping).on_press(Presenter::toggle_loop))
@@ -562,7 +619,11 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
                 .on_press(Presenter::toggle_mute),
         )
         .child(button("Vol −", false).on_press(|s: &mut Presenter| s.change_volume(-0.05)))
-        .child(text(format!("{volume}%")).font(type_::MONO_CAPTION).color(theme.text_secondary))
+        .child(
+            text(format!("{volume}%"))
+                .font(type_::MONO_CAPTION)
+                .color(theme.text_secondary),
+        )
         .child(button("Vol +", false).on_press(|s: &mut Presenter| s.change_volume(0.05)))
         .child(button(s.cfg.fit.label(), false).on_press(Presenter::toggle_fit));
 
@@ -581,12 +642,24 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .radius(8.0)
         .center_y()
         .cursor(Cursor::Pointer)
-        .fill(if open { accent.alpha(0.9) } else { theme.control_off })
-        .child(text(trigger_label).font(type_::LABEL).color(if open { Color::WHITE } else { theme.text }))
+        .fill(if open {
+            accent.alpha(0.9)
+        } else {
+            theme.control_off
+        })
+        .child(text(trigger_label).font(type_::LABEL).color(if open {
+            Color::WHITE
+        } else {
+            theme.text
+        }))
         .child(
             icon(&CHEVRON_DOWN, 14.0)
                 .icon_rotation(if open { std::f32::consts::PI } else { 0.0 })
-                .color(if open { Color::WHITE } else { theme.text_secondary }),
+                .color(if open {
+                    Color::WHITE
+                } else {
+                    theme.text_secondary
+                }),
         )
         .on_press(|s: &mut Presenter| {
             if !s.displays.is_empty() {
@@ -606,7 +679,9 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .child(toggle("Hide cursor", s.cfg.hide_cursor).on_press(Presenter::toggle_cursor));
 
     let mut footer = col().gap(2.0).w_full().child(
-        text(s.status_line()).font(type_::MONO_CAPTION).color(theme.text_secondary),
+        text(s.status_line())
+            .font(type_::MONO_CAPTION)
+            .color(theme.text_secondary),
     );
     if let Some(error) = &s.error {
         footer = footer.child(text(error).font(type_::LABEL).color(DANGER));
@@ -633,8 +708,16 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
                 .radius(6.0)
                 .center_y()
                 .cursor(Cursor::Pointer)
-                .fill(if on { accent.alpha(0.9) } else { theme.control_off })
-                .child(text(label).font(type_::LABEL).color(if on { Color::WHITE } else { theme.text }))
+                .fill(if on {
+                    accent.alpha(0.9)
+                } else {
+                    theme.control_off
+                })
+                .child(text(label).font(type_::LABEL).color(if on {
+                    Color::WHITE
+                } else {
+                    theme.text
+                }))
                 .on_press(move |s: &mut Presenter| {
                     s.choose_display(index);
                     s.picker_open = false;
@@ -666,8 +749,7 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         // they close the picker instead of reaching the controls underneath.
         root = root
             .child(
-                el()
-                    .key("present_on_scm")
+                el().key("present_on_scm")
                     .absolute(0.0, 0.0)
                     .w_full()
                     .h_full()
@@ -682,12 +764,15 @@ pub fn projection_view(p: &Projection, _cx: &mut Cx<Projection>) -> El {
     let mut root = el().key("projector").w_full().h_full().fill(Color::BLACK);
     if let Some(player) = &p.player {
         root = root.child(
-            el()
-                .key("frame")
+            el().key("frame")
                 .w_full()
                 .h_full()
                 .native_surface(player.surface(), p.fit.surface())
-                .cursor(if p.hide_cursor { Cursor::Hidden } else { Cursor::Default }),
+                .cursor(if p.hide_cursor {
+                    Cursor::Hidden
+                } else {
+                    Cursor::Default
+                }),
         );
     }
     root

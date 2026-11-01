@@ -15,7 +15,7 @@ mod ui;
 use media::Tools;
 use player::Wakers;
 use rune::{
-    App, AppSpec, AnyWindowSpec, Display, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions,
+    AnyWindowSpec, App, AppSpec, Display, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions,
     OverlayPlacement, OverlaySpec, WindowOptions, WindowSpec,
 };
 use settings::Settings;
@@ -57,7 +57,12 @@ fn main() {
     rune::run_windows(move |displays| build(file.clone(), present, autoplay, displays));
 }
 
-fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Display]) -> Vec<AnyWindowSpec> {
+fn build(
+    file: Option<PathBuf>,
+    present: bool,
+    autoplay: bool,
+    displays: &[Display],
+) -> Vec<AnyWindowSpec> {
     let cfg = Settings::load();
     let tools = Tools::discover();
     let wakers = Wakers::new();
@@ -74,8 +79,14 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
 
     let target = cfg.resolve(&displays).map(|index| displays[index].clone());
     // Points, not physical pixels: where `place` works it sets the exact physical rectangle anyway.
-    let size = target.as_ref().map(ui::display_points).unwrap_or((1280.0, 720.0));
-    let initial = target.as_ref().map(ui::display_target).unwrap_or(DisplayTarget::Primary);
+    let size = target
+        .as_ref()
+        .map(ui::display_points)
+        .unwrap_or((1280.0, 720.0));
+    let initial = target
+        .as_ref()
+        .map(ui::display_target)
+        .unwrap_or(DisplayTarget::Primary);
 
     let state = Projection {
         player: None,
@@ -118,13 +129,21 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
             min_size: Some((0.0, 0.0)),
             setup: Some(ui::projection_setup),
             on_key: Some(ui::projection_key),
-            ..AppSpec::new("vidshow — presentation", size, no_projection, ui::projection_view)
+            ..AppSpec::new(
+                "vidshow — presentation",
+                size,
+                no_projection,
+                ui::projection_view,
+            )
         })
         .on_close(ui::projection_closed)
         // Maps at its final size, so a tiling window manager floats it instead of tiling it.
         .float_on_open();
-        let (state, handle) = control
-            .window(WindowSpec::from_app("projection", app).state(state).options(options));
+        let (state, handle) = control.window(
+            WindowSpec::from_app("projection", app)
+                .state(state)
+                .options(options),
+        );
         ui::Projector::window(handle, state)
     };
 

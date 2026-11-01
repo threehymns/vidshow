@@ -66,7 +66,11 @@ struct Clock {
 
 impl Default for Clock {
     fn default() -> Self {
-        Self { base: 0.0, at: Instant::now(), playing: false }
+        Self {
+            base: 0.0,
+            at: Instant::now(),
+            playing: false,
+        }
     }
 }
 
@@ -214,7 +218,9 @@ impl Inner {
     /// Put the frame already decoded on the projector, so a clip that is paused before its first
     /// present still shows up.
     fn repaint(&self) {
-        let Some(last) = self.last.lock().unwrap().clone() else { return };
+        let Some(last) = self.last.lock().unwrap().clone() else {
+            return;
+        };
         let id = self.frame_id.fetch_add(1, SeqCst);
         let _ = self.surface.push_bytes(
             ByteFrame {
@@ -269,7 +275,10 @@ impl Player {
     pub fn load(tools: &Tools, path: &Path, wakers: Arc<Wakers>) -> Result<Self, String> {
         let info = media::probe(tools, path)?;
         let inner = Inner::new(info.clone(), wakers);
-        let player = Self { info: info.clone(), inner: inner.clone() };
+        let player = Self {
+            info: info.clone(),
+            inner: inner.clone(),
+        };
         // A silent clip needs no audio device, and should not look like a failure.
         let audio = if info.has_audio {
             match Audio::start(tools, &info, 0.0) {
@@ -288,7 +297,11 @@ impl Player {
             audio.set_gain(1.0);
         }
         *inner.audio.lock().unwrap() = audio;
-        *inner.clock.lock().unwrap() = Clock { base: 0.0, at: Instant::now(), playing: true };
+        *inner.clock.lock().unwrap() = Clock {
+            base: 0.0,
+            at: Instant::now(),
+            playing: true,
+        };
         let tools = tools.clone();
         let decode = inner.clone();
         std::thread::spawn(move || decode_loop(decode, tools, info));
@@ -423,7 +436,9 @@ impl Player {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.inner.volume.store(volume.clamp(0.0, 1.0).to_bits(), SeqCst);
+        self.inner
+            .volume
+            .store(volume.clamp(0.0, 1.0).to_bits(), SeqCst);
         self.inner.set_gain();
     }
 
@@ -547,7 +562,10 @@ fn decode_loop(inner: Arc<Inner>, tools: Tools, info: MediaInfo) {
                 }
                 Err(error) => {
                     // A decode error after some frames is usually a damaged tail; report it.
-                    let stderr = log.lock().map(|text| text.trim().to_string()).unwrap_or_default();
+                    let stderr = log
+                        .lock()
+                        .map(|text| text.trim().to_string())
+                        .unwrap_or_default();
                     let detail = if stderr.is_empty() { error } else { stderr };
                     inner.fail(detail);
                     inner.kill_video();
