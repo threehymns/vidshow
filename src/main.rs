@@ -7,20 +7,27 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod keybinds;
+mod keys;
 mod media;
 mod player;
+mod projection;
 mod settings;
+mod settings_window;
 mod ui;
 
+use keybinds::Keybinds;
 use media::Tools;
 use player::Wakers;
+use projection::{Projection, Projector};
 use rune::{
     AnyWindowSpec, App, AppSpec, Display, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions,
     OverlayPlacement, OverlaySpec, WindowOptions, WindowSpec,
 };
 use settings::Settings;
 use std::path::PathBuf;
-use ui::{Presenter, Projection};
+use std::sync::Arc;
+use ui::Presenter;
 
 /// Stand-in for `AppSpec::init`; `App::init` supplies the real state, which needs handles that
 /// only exist once both windows do.
@@ -70,9 +77,11 @@ fn build(
 
     let mut control = App::new(AppSpec {
         min_size: Some((860.0, 620.0)),
+        fonts: rune_theme_opencode::FONTS,
+        families: rune_theme_opencode::FAMILIES,
         setup: Some(ui::presenter_setup),
         poll: Some(ui::presenter_poll),
-        on_key: Some(ui::presenter_key),
+        on_key: Some(keys::presenter_key),
         ..AppSpec::new("vidshow", (1120.0, 780.0), no_presenter, ui::presenter_view)
     });
     let control_handle = control.handle();
@@ -81,27 +90,31 @@ fn build(
     // Points, not physical pixels: where `place` works it sets the exact physical rectangle anyway.
     let size = target
         .as_ref()
-        .map(ui::display_points)
+        .map(projection::display_points)
         .unwrap_or((1280.0, 720.0));
     let initial = target
         .as_ref()
-        .map(ui::display_target)
+        .map(projection::display_target)
         .unwrap_or(DisplayTarget::Primary);
 
     let state = Projection {
         player: None,
         fit: cfg.fit,
         hide_cursor: cfg.hide_cursor,
-        presenter: control_handle.clone(),
+        // The projector cannot reach into the control window, so it calls back instead.
+        on_closed: Arc::new(move || {
+            control_handle.update(|s, _| s.presenting = false);
+        }),
         wakers: wakers.clone(),
+        keybinds: Keybinds::defaults(),
     };
 
     // Wayland gives a client no say in where a window opens, so there the picture is a layer-shell
     // overlay pinned to the chosen output. Everywhere else it is an ordinary window, placed.
     let projection = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        ui::Projector::overlay(
+        Projector::overlay(
             control.overlay(
-                OverlaySpec::new("vidshow — presentation", size, ui::projection_view)
+                OverlaySpec::new("vidshow — presentation", size, projection::projection_view)
                     .options(OverlayOptions {
                         placement: Some(OverlayPlacement::FullScreen),
                         display: initial,
@@ -110,7 +123,7 @@ fn build(
                         keys: KeyPolicy::None,
                         ..Default::default()
                     })
-                    .setup(ui::projection_setup),
+                    .setup(projection::projection_setup),
                 state,
             ),
         )
@@ -127,16 +140,16 @@ fn build(
         };
         let app = App::new(AppSpec {
             min_size: Some((0.0, 0.0)),
-            setup: Some(ui::projection_setup),
-            on_key: Some(ui::projection_key),
+            setup: Some(projection::projection_setup),
+            on_key: Some(keys::projection_key),
             ..AppSpec::new(
                 "vidshow — presentation",
                 size,
                 no_projection,
-                ui::projection_view,
+                projection::projection_view,
             )
         })
-        .on_close(ui::projection_closed)
+        .on_close(projection::projection_closed)
         // Maps at its final size, so a tiling window manager floats it instead of tiling it.
         .float_on_open();
         let (state, handle) = control.window(
@@ -144,11 +157,12 @@ fn build(
                 .state(state)
                 .options(options),
         );
-        ui::Projector::window(handle, state)
+        Projector::window(handle, state)
     };
 
     let control = control.init(move || Presenter {
         tools,
+        keybinds: Keybinds::defaults(),
         player: None,
         path: None,
         error: None,
@@ -156,6 +170,7 @@ fn build(
         displays,
         presenting: false,
         picker_open: false,
+        settings_open: false,
         projection,
         wakers: wakers.clone(),
         pending: file,

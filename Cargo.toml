@@ -12,6 +12,9 @@ path = "src/main.rs"
 [dependencies]
 # Pinned to the commit this app was written against.
 rune = { git = "https://github.com/anomalyco/rune", rev = "f5def6d4f9259580cbbd6472498e4de6b4d754b6", features = ["native-file-dialog"] }
+# The stock OpenCode theme (tokens, fonts, icons) and the kit that reads its semantic tokens.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "f5def6d4f9259580cbbd6472498e4de6b4d754b6" }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "f5def6d4f9259580cbbd6472498e4de6b4d754b6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # rune hashes with blake3. Its C/assembly implementation needs a C toolchain for the target;
