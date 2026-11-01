@@ -1,0 +1,27 @@
+[package]
+name = "vidshow"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Present a video file on a second display, with a control window and a projector window."
+
+[[bin]]
+name = "vidshow"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to the commit this app was written against.
+rune = { git = "https://github.com/anomalyco/rune", rev = "f5def6d4f9259580cbbd6472498e4de6b4d754b6", features = ["native-file-dialog"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rune hashes with blake3. Its C/assembly implementation needs a C toolchain for the target;
+# pure Rust keeps the Windows build cross-compilable and portable. Same output, only slower.
+blake3 = { version = "1", features = ["pure"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4

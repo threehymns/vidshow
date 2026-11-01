@@ -1,0 +1,379 @@
+//! ffmpeg is vidshow's decoder, so everything ffmpeg can read, vidshow can present.
+//!
+//! `Tools` finds the binaries, `probe` asks ffprobe what a file is, and the `spawn_*` functions
+//! start ffmpeg writing raw frames (or PCM) to a pipe. Rune's own `Player` is macOS-only, so the
+//! decode path here is ours: BGRA frames pushed into a `NativeSurface`.
+
+use serde_json::Value;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+/// Hidden console windows: a GUI app spawning ffmpeg on Windows must not flash a console.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn command(program: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new(program);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
+fn exe_name(stem: &str) -> String {
+    if cfg!(windows) {
+        format!("{stem}.exe")
+    } else {
+        stem.to_string()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Tools {
+    pub ffmpeg: PathBuf,
+    pub ffprobe: PathBuf,
+}
+
+impl Tools {
+    /// Search order: `VIDSHOW_FFMPEG` (a directory or the ffmpeg binary), next to vidshow.exe,
+    /// `bin` beside it, then `PATH`. ffprobe is expected beside ffmpeg.
+    pub fn discover() -> Result<Self, String> {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut direct: Option<PathBuf> = None;
+        if let Some(value) = std::env::var_os("VIDSHOW_FFMPEG") {
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                direct = path.parent().map(Path::to_path_buf);
+            } else if path.is_dir() {
+                dirs.push(path);
+            }
+        }
+        if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+            dirs.push(dir.join("ffmpeg"));
+            dirs.push(dir.join("ffmpeg").join("bin"));
+            dirs.push(dir.join("bin"));
+            dirs.push(dir);
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&path));
+        }
+        if let Some(dir) = direct {
+            dirs.insert(0, dir);
+        }
+
+        for dir in &dirs {
+            let ffmpeg = dir.join(exe_name("ffmpeg"));
+            let ffprobe = dir.join(exe_name("ffprobe"));
+            if ffmpeg.is_file() && ffprobe.is_file() {
+                return Ok(Self { ffmpeg, ffprobe });
+            }
+        }
+        let tried: Vec<String> = dirs.iter().take(4).map(|d| d.display().to_string()).collect();
+        Err(format!(
+            "ffmpeg and ffprobe were not found. Put ffmpeg.exe and ffprobe.exe beside vidshow.exe \
+             (or in a bin folder beside it), add them to PATH, or set VIDSHOW_FFMPEG to their \
+             folder. Searched: {}",
+            tried.join("; ")
+        ))
+    }
+}
+
+/// What vidshow needs to know before decoding: how big, how fast and how long.
+#[derive(Clone, Debug)]
+pub struct MediaInfo {
+    pub path: PathBuf,
+    pub title: String,
+    pub duration: f64,
+    /// Upright dimensions: already swapped for 90°/270° rotation.
+    pub width: u32,
+    pub height: u32,
+    pub fps: f64,
+    /// The frame rate as ffmpeg wants it, so index-based timing matches its output.
+    pub fps_arg: String,
+    /// Degrees clockwise to apply, 0/90/180/270.
+    pub rotation: i32,
+    /// Read by the Windows audio backend; other platforms play silently.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub has_audio: bool,
+}
+
+impl MediaInfo {
+    pub fn frame_bytes(&self) -> usize {
+        self.width as usize * self.height as usize * 4
+    }
+}
+
+fn run_json(program: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = command(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("can't run {}: {e}", program.display()))?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let line = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
+        return Err(format!("{} couldn't read this file: {line}", program.display()));
+    }
+    Ok(output.stdout)
+}
+
+fn ratio(value: Option<&Value>) -> Option<(String, f64)> {
+    let text = value?.as_str()?;
+    let (num, den) = text.split_once('/')?;
+    let (num, den) = (num.parse::<f64>().ok()?, den.parse::<f64>().ok()?);
+    if num <= 0.0 || den <= 0.0 {
+        return None;
+    }
+    Some((format!("{}/{den}", num as i64), num / den))
+}
+
+/// Turns the display-matrix rotation ffprobe reports into the clockwise rotation to draw with.
+fn clockwise(rotation: f64) -> i32 {
+    let r = rotation.round() as i64 % 360;
+    (((360 - r) % 360) as i32 / 90 * 90).rem_euclid(360)
+}
+
+pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
+    let path_str = path.to_string_lossy().into_owned();
+    let json = run_json(
+        &tools.ffprobe,
+        &["-v", "error", "-print_format", "json", "-show_format", "-show_streams", &path_str],
+    )?;
+    let root: Value = serde_json::from_slice(&json).map_err(|e| format!("can't read ffprobe's answer: {e}"))?;
+    let streams = root["streams"].as_array().cloned().unwrap_or_default();
+
+    let video = streams
+        .iter()
+        .find(|s| s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64().unwrap_or(0) == 0)
+        .ok_or_else(|| format!("{} has no video stream", title_of(path)))?;
+    let width = video["width"].as_u64().unwrap_or(0) as u32;
+    let height = video["height"].as_u64().unwrap_or(0) as u32;
+    if width == 0 || height == 0 {
+        return Err(format!("{} reports no picture size", title_of(path)));
+    }
+
+    let (fps_arg, fps) = ratio(video.get("avg_frame_rate"))
+        .or_else(|| ratio(video.get("r_frame_rate")))
+        .unwrap_or_else(|| ("30/1".to_string(), 30.0));
+    let fps = fps.clamp(1.0, 480.0);
+
+    let rotation = video
+        .get("side_data_list")
+        .and_then(|list| list.as_array())
+        .and_then(|list| list.iter().find_map(|entry| entry.get("rotation").and_then(Value::as_f64)))
+        .or_else(|| video["tags"]["rotate"].as_str().and_then(|text| text.trim().parse::<f64>().ok()))
+        .map(clockwise)
+        .unwrap_or(0);
+
+    let duration = root["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .or_else(|| video["duration"].as_str().and_then(|d| d.parse::<f64>().ok()))
+        .unwrap_or(0.0);
+
+    let has_audio = streams.iter().any(|s| s["codec_type"] == "audio");
+
+    let (width, height) = if rotation == 90 || rotation == 270 { (height, width) } else { (width, height) };
+    Ok(MediaInfo {
+        path: path.to_path_buf(),
+        title: title_of(path),
+        duration,
+        width,
+        height,
+        fps,
+        fps_arg,
+        rotation,
+        has_audio,
+    })
+}
+
+fn title_of(path: &Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned())
+}
+
+/// The last few lines ffmpeg wrote to stderr, for error messages when it exits early.
+pub type Stderr = Arc<Mutex<String>>;
+
+fn drain_stderr(stderr: std::process::ChildStderr) -> Stderr {
+    let log = Arc::new(Mutex::new(String::new()));
+    let sink = log.clone();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let mut text = sink.lock().unwrap();
+            text.push_str(&line);
+            text.push('\n');
+            if text.len() > 4096 {
+                let tail: Vec<String> = text.lines().rev().take(8).map(str::to_string).collect();
+                *text = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+                text.push('\n');
+            }
+        }
+    });
+    log
+}
+
+fn spawn_with_stderr(mut command: Command) -> Result<(Child, Stderr), String> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| format!("can't start ffmpeg: {e}"))?;
+    let log = match child.stderr.take() {
+        Some(stderr) => drain_stderr(stderr),
+        None => Arc::new(Mutex::new(String::new())),
+    };
+    Ok((child, log))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pipes(command: &mut Command, info: &MediaInfo, start: f64, map: &str, extra: &[&str]) {
+    command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
+    if start > 0.05 {
+        command.arg("-ss").arg(format!("{start:.3}"));
+    }
+    command.arg("-i").arg(&info.path);
+    command.args(["-map", map, "-sn", "-dn"]);
+    command.args(extra);
+}
+
+/// Starts decoding video to raw BGRA on stdout, from `start` seconds in.
+pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child, Stderr), String> {
+    let mut command = command(&tools.ffmpeg);
+    // Autorotate is off so the output size is exactly what `probe` computed; the rotation is
+    // applied here instead.
+    command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-noautorotate"]);
+    if start > 0.05 {
+        command.arg("-ss").arg(format!("{start:.3}"));
+    }
+    command.arg("-i").arg(&info.path);
+    command.args(["-map", "0:v:0", "-an", "-sn", "-dn"]);
+    let filter = match info.rotation {
+        90 => Some("transpose=1"),
+        180 => Some("hflip,vflip"),
+        270 => Some("transpose=2"),
+        _ => None,
+    };
+    if let Some(filter) = filter {
+        command.args(["-vf", filter]);
+    }
+    command.args(["-r", &info.fps_arg, "-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"]);
+    spawn_with_stderr(command)
+}
+
+/// Starts decoding the first audio track to interleaved f32 PCM at the output device's rate.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn spawn_audio(tools: &Tools, info: &MediaInfo, start: f64, rate: u32, channels: u16) -> Result<(Child, Stderr), String> {
+    let mut command = command(&tools.ffmpeg);
+    pipes(
+        &mut command,
+        info,
+        start,
+        "0:a:0",
+        &["-vn", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-f", "f32le", "pipe:1"],
+    );
+    spawn_with_stderr(command)
+}
+
+/// Reads exactly `size` bytes; `Ok(false)` at a clean end of stream.
+pub fn read_frame(reader: &mut impl Read, buffer: &mut [u8]) -> Result<bool, String> {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match reader.read(&mut buffer[filled..]) {
+            Ok(0) => {
+                if filled == 0 {
+                    return Ok(false);
+                }
+                return Err("ffmpeg stopped mid-frame".into());
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(format!("can't read decoded frames: {e}")),
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_becomes_clockwise_degrees() {
+        assert_eq!(clockwise(-90.0), 90);
+        assert_eq!(clockwise(90.0), 270);
+        assert_eq!(clockwise(180.0), 180);
+        assert_eq!(clockwise(0.0), 0);
+        assert_eq!(clockwise(-270.0), 270);
+    }
+
+    /// The real command line, against a real ffmpeg: probe a generated clip, then decode a frame
+    /// and check it is exactly the BGRA size `probe` promised. Skipped without ffmpeg.
+    #[test]
+    fn decodes_frames_at_the_size_probe_reported() {
+        let Some(tools) = test_tools() else {
+            eprintln!("skipping the decode test: ffmpeg and ffprobe are not available");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vidshow-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let made = command(&tools.ffmpeg)
+            .args([
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "2",
+                "-pix_fmt", "yuv420p",
+            ])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success(), "ffmpeg could not write the test clip");
+
+        let info = probe(&tools, &clip).unwrap();
+        assert_eq!((info.width, info.height), (320, 240));
+        assert!((info.fps - 25.0).abs() < 0.1, "fps {}", info.fps);
+        assert!((info.duration - 2.0).abs() < 0.4, "duration {}", info.duration);
+        assert_eq!(info.rotation, 0);
+
+        let (mut child, _log) = spawn_video(&tools, &info, 0.0).unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut frame = vec![0u8; info.frame_bytes()];
+        assert!(read_frame(&mut reader, &mut frame).unwrap(), "a frame arrives");
+        assert!(frame.iter().any(|byte| *byte != 0), "testsrc has colour in it");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        // A seek reopens ffmpeg late in the clip and still yields a whole frame.
+        let (mut child, _log) = spawn_video(&tools, &info, 1.0).unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut frame = vec![0u8; info.frame_bytes()];
+        assert!(read_frame(&mut reader, &mut frame).unwrap(), "a frame after seeking");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_tools() -> Option<Tools> {
+        let local = Path::new(env!("CARGO_MANIFEST_DIR")).join(".tools");
+        let (ffmpeg, ffprobe) = (local.join(exe_name("ffmpeg")), local.join(exe_name("ffprobe")));
+        if ffmpeg.is_file() && ffprobe.is_file() {
+            return Some(Tools { ffmpeg, ffprobe });
+        }
+        Tools::discover().ok()
+    }
+
+    #[test]
+    fn frame_rate_strings_keep_their_ratio() {
+        let value = serde_json::json!("30000/1001");
+        let (arg, fps) = ratio(Some(&value)).unwrap();
+        assert_eq!(arg, "30000/1001");
+        assert!((fps - 29.97).abs() < 0.01);
+        assert!(ratio(Some(&serde_json::json!("0/0"))).is_none());
+    }
+}

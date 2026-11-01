@@ -1,0 +1,6 @@
+/target
+/.tools
+# portable bundle staging: build it, do not commit the binaries
+/dist
+# written beside the exe when vidshow.portable is present
+/settings.json
