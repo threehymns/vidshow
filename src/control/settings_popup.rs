@@ -3,21 +3,25 @@
 //! It is a rune-kit dialog mounted over the control window, so it reads that window's state and
 //! applies every toggle to the running clip and projector straight away.
 
-use crate::ui::Presenter;
+use super::{Overlay, Presenter};
 use rune::{El, col};
 use rune_kit::{Dialog, Kit, Switch};
 
 /// Mount the settings dialog while it is open. The dialog brings its own scrim, focus and
 /// Escape/click-outside dismissal, so the control window only has to open it.
 pub fn settings_window(s: &Presenter, k: &Kit, layer: &mut Vec<El>) {
-    if !s.settings_open {
+    if s.overlay != Overlay::Settings {
         return;
     }
     Dialog::new("settings", "Settings")
         .open(true)
         .fit()
         .width(360.0)
-        .on_close(|s: &mut Presenter| s.settings_open = false)
+        .on_close(|s: &mut Presenter| {
+            if s.overlay == Overlay::Settings {
+                s.overlay = Overlay::None;
+            }
+        })
         .child(
             col()
                 .key("settings-options")

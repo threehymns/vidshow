@@ -93,28 +93,56 @@ impl Tools {
     }
 }
 
+/// The frame rate, held as both ffmpeg's `-r` argument and the number it means.
+#[derive(Clone, Debug)]
+pub struct FrameRate {
+    /// Exactly what ffmpeg is told, so index-based timing matches its output.
+    pub arg: String,
+    pub value: f64,
+}
+
+impl Default for FrameRate {
+    fn default() -> Self {
+        Self {
+            arg: "30/1".to_string(),
+            value: 30.0,
+        }
+    }
+}
+
+impl FrameRate {
+    /// A rate a decoder can be paced against. An absurd one is refused rather than clamped, so the
+    /// number and the argument told to ffmpeg can never disagree.
+    fn new(arg: String, value: f64) -> Option<Self> {
+        (1.0..=480.0)
+            .contains(&value)
+            .then_some(Self { arg, value })
+    }
+}
+
 /// What vidshow needs to know before decoding: how big, how fast and how long.
 #[derive(Clone, Debug)]
 pub struct MediaInfo {
     pub path: PathBuf,
-    pub title: String,
     pub duration: f64,
     /// Upright dimensions: already swapped for 90°/270° rotation.
     pub width: u32,
     pub height: u32,
-    pub fps: f64,
-    /// The frame rate as ffmpeg wants it, so index-based timing matches its output.
-    pub fps_arg: String,
+    pub fps: FrameRate,
     /// Degrees clockwise to apply, 0/90/180/270.
     pub rotation: i32,
     /// Read by the audio back end; platforms without one play silently.
-    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub has_audio: bool,
 }
 
 impl MediaInfo {
     pub fn frame_bytes(&self) -> usize {
         self.width as usize * self.height as usize * 4
+    }
+
+    /// The file's own name, for the control window's title.
+    pub fn title(&self) -> String {
+        title_of(&self.path)
     }
 }
 
@@ -186,10 +214,10 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
         return Err(format!("{} reports no picture size", title_of(path)));
     }
 
-    let (fps_arg, fps) = ratio(video.get("avg_frame_rate"))
+    let fps = ratio(video.get("avg_frame_rate"))
         .or_else(|| ratio(video.get("r_frame_rate")))
-        .unwrap_or_else(|| ("30/1".to_string(), 30.0));
-    let fps = fps.clamp(1.0, 480.0);
+        .and_then(|(arg, value)| FrameRate::new(arg, value))
+        .unwrap_or_default();
 
     let rotation = video
         .get("side_data_list")
@@ -225,12 +253,10 @@ pub fn probe(tools: &Tools, path: &Path) -> Result<MediaInfo, String> {
     };
     Ok(MediaInfo {
         path: path.to_path_buf(),
-        title: title_of(path),
         duration,
         width,
         height,
         fps,
-        fps_arg,
         rotation,
         has_audio,
     })
@@ -280,46 +306,36 @@ fn spawn_with_stderr(mut command: Command) -> Result<(Child, Stderr), String> {
     Ok((child, log))
 }
 
+/// The options both decoders share: quiet, seeking before the input, and no subtitle or data
+/// streams. `input` holds the input options the caller needs, which ffmpeg wants before `-i`.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn pipes(command: &mut Command, info: &MediaInfo, start: f64, map: &str, extra: &[&str]) {
+fn decoder(tools: &Tools, info: &MediaInfo, start: f64, input: &[&str]) -> Command {
+    let mut command = command(&tools.ffmpeg);
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
+    command.args(input);
     if start > 0.05 {
         command.arg("-ss").arg(format!("{start:.3}"));
     }
     command.arg("-i").arg(&info.path);
-    command.args(["-map", map, "-sn", "-dn"]);
-    command.args(extra);
+    command.args(["-sn", "-dn"]);
+    command
 }
 
 /// Starts decoding video to raw BGRA on stdout, from `start` seconds in.
 pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child, Stderr), String> {
-    let mut command = command(&tools.ffmpeg);
     // Autorotate is off so the output size is exactly what `probe` computed; the rotation is
     // applied here instead.
-    command.args([
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-noautorotate",
-    ]);
-    if start > 0.05 {
-        command.arg("-ss").arg(format!("{start:.3}"));
-    }
-    command.arg("-i").arg(&info.path);
-    command.args(["-map", "0:v:0", "-an", "-sn", "-dn"]);
-    let filter = match info.rotation {
-        90 => Some("transpose=1"),
-        180 => Some("hflip,vflip"),
-        270 => Some("transpose=2"),
-        _ => None,
+    let mut command = decoder(tools, info, start, &["-noautorotate"]);
+    command.args(["-map", "0:v:0", "-an"]);
+    match info.rotation {
+        90 => command.args(["-vf", "transpose=1"]),
+        180 => command.args(["-vf", "hflip,vflip"]),
+        270 => command.args(["-vf", "transpose=2"]),
+        _ => &mut command,
     };
-    if let Some(filter) = filter {
-        command.args(["-vf", filter]);
-    }
     command.args([
         "-r",
-        &info.fps_arg,
+        &info.fps.arg,
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -338,23 +354,11 @@ pub fn spawn_audio(
     rate: u32,
     channels: u16,
 ) -> Result<(Child, Stderr), String> {
-    let mut command = command(&tools.ffmpeg);
-    pipes(
-        &mut command,
-        info,
-        start,
-        "0:a:0",
-        &[
-            "-vn",
-            "-ac",
-            &channels.to_string(),
-            "-ar",
-            &rate.to_string(),
-            "-f",
-            "f32le",
-            "pipe:1",
-        ],
-    );
+    let (rate, channels) = (rate.to_string(), channels.to_string());
+    let mut command = decoder(tools, info, start, &[]);
+    command.args(["-map", "0:a:0", "-vn"]);
+    command.args(["-ac", &channels, "-ar", &rate]);
+    command.args(["-f", "f32le", "pipe:1"]);
     spawn_with_stderr(command)
 }
 
@@ -424,7 +428,11 @@ mod tests {
 
         let info = probe(&tools, &clip).unwrap();
         assert_eq!((info.width, info.height), (320, 240));
-        assert!((info.fps - 25.0).abs() < 0.1, "fps {}", info.fps);
+        assert!(
+            (info.fps.value - 25.0).abs() < 0.1,
+            "fps {}",
+            info.fps.value
+        );
         assert!(
             (info.duration - 2.0).abs() < 0.4,
             "duration {}",
@@ -476,8 +484,11 @@ mod tests {
     fn frame_rate_strings_keep_their_ratio() {
         let value = serde_json::json!("30000/1001");
         let (arg, fps) = ratio(Some(&value)).unwrap();
-        assert_eq!(arg, "30000/1001");
-        assert!((fps - 29.97).abs() < 0.01);
+        let rate = FrameRate::new(arg, fps).unwrap();
+        assert_eq!(rate.arg, "30000/1001");
+        assert!((rate.value - 29.97).abs() < 0.01);
         assert!(ratio(Some(&serde_json::json!("0/0"))).is_none());
+        // A rate nothing can be paced against is refused, so arg and value stay in agreement.
+        assert!(FrameRate::new("100000/1".to_string(), 100_000.0).is_none());
     }
 }

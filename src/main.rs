@@ -7,27 +7,24 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod audio;
+mod control;
 mod keybinds;
-mod keys;
 mod media;
 mod player;
 mod projection;
 mod settings;
-mod settings_window;
-mod ui;
 
+use control::{Clip, Overlay, Presenter, Startup};
 use keybinds::Keybinds;
 use media::Tools;
 use player::Wakers;
-use projection::{Projection, Projector};
+use projection::{Event, Projection, Projector};
 use rune::{
     AnyWindowSpec, App, AppSpec, Display, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions,
     OverlayPlacement, OverlaySpec, WindowOptions, WindowSpec,
 };
 use settings::Settings;
-use std::path::PathBuf;
 use std::sync::Arc;
-use ui::Presenter;
 
 /// Stand-in for `AppSpec::init`; `App::init` supplies the real state, which needs handles that
 /// only exist once both windows do.
@@ -43,34 +40,12 @@ fn main() {
     rune::set_app_id("vidshow");
 
     // Rune takes its own flags; what is left is the file Explorer (or a shell) passed us.
-    let mut file: Option<PathBuf> = None;
-    let mut present = false;
-    let mut autoplay = true;
-    for arg in rune::extra_args() {
-        match arg.as_str() {
-            "--present" => present = true,
-            "--no-play" => autoplay = false,
-            other if !other.starts_with('-') && file.is_none() => {
-                let path = PathBuf::from(other);
-                // A mistyped path should not look like a failure to open a real file.
-                if path.is_file() {
-                    file = Some(path);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    rune::run_windows(move |displays| build(file.clone(), present, autoplay, displays));
+    let startup = Startup::parse(rune::extra_args());
+    rune::run_windows(move |displays| build(startup.clone(), displays));
 }
 
-fn build(
-    file: Option<PathBuf>,
-    present: bool,
-    autoplay: bool,
-    displays: &[Display],
-) -> Vec<AnyWindowSpec> {
-    let cfg = Settings::load();
+fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
+    let (cfg, settings_problem) = Settings::load();
     let tools = Tools::discover();
     let wakers = Wakers::new();
     let displays: Vec<Display> = displays.to_vec();
@@ -79,10 +54,15 @@ fn build(
         min_size: Some((860.0, 620.0)),
         fonts: rune_theme_opencode::FONTS,
         families: rune_theme_opencode::FAMILIES,
-        setup: Some(ui::presenter_setup),
-        poll: Some(ui::presenter_poll),
-        on_key: Some(keys::presenter_key),
-        ..AppSpec::new("vidshow", (1120.0, 780.0), no_presenter, ui::presenter_view)
+        setup: Some(control::presenter_setup),
+        poll: Some(control::presenter_poll),
+        on_key: Some(control::presenter_key),
+        ..AppSpec::new(
+            "vidshow",
+            (1120.0, 780.0),
+            no_presenter,
+            control::presenter_view,
+        )
     });
     let control_handle = control.handle();
 
@@ -97,14 +77,22 @@ fn build(
         .map(projection::display_target)
         .unwrap_or(DisplayTarget::Primary);
 
+    // The projector cannot reach into the control window, so it reports back: one wire for the
+    // transport actions it is asked for and for closing itself.
+    let notify: projection::Notify = Arc::new(move |event| {
+        control_handle.update(move |s, _| match event {
+            Event::Action(action) => {
+                s.perform_playback(action);
+            }
+            Event::Closed => s.stop_presenting(),
+        });
+    });
+
     let state = Projection {
         player: None,
         fit: cfg.fit,
         hide_cursor: cfg.hide_cursor,
-        // The projector cannot reach into the control window, so it calls back instead.
-        on_closed: Arc::new(move || {
-            control_handle.update(|s, _| s.presenting = false);
-        }),
+        notify,
         wakers: wakers.clone(),
         keybinds: Keybinds::defaults(),
     };
@@ -141,7 +129,7 @@ fn build(
         let app = App::new(AppSpec {
             min_size: Some((0.0, 0.0)),
             setup: Some(projection::projection_setup),
-            on_key: Some(keys::projection_key),
+            on_key: Some(projection::projection_key),
             ..AppSpec::new(
                 "vidshow — presentation",
                 size,
@@ -163,19 +151,15 @@ fn build(
     let control = control.init(move || Presenter {
         tools,
         keybinds: Keybinds::defaults(),
-        player: None,
-        path: None,
-        error: None,
+        clip: Clip::None,
         cfg,
         displays,
+        overlay: Overlay::None,
         presenting: false,
-        picker_open: false,
-        settings_open: false,
         projection,
         wakers: wakers.clone(),
-        pending: file,
-        auto_present: present,
-        autoplay,
+        notice: settings_problem,
+        startup: Some(startup),
         scrub: None,
     });
 

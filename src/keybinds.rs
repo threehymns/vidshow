@@ -1,138 +1,96 @@
 //! Keybindings: every shortcut the app answers to, in one table.
 //!
-//! Adapted from sheath's `keybinds`: one [`Action`] per command, one default chord per action,
-//! and a single [`Keybinds::matches`] that maps a key event back to the physical key it was
-//! pressed on. The parts sheath needs for rebinding (a KDL store, recorders, conflict checks)
-//! are left out, since vidshow has no rebinding UI yet.
+//! One [`Action`] per command, one default chord per action, and one [`Keybinds::action_for`] that
+//! maps a key event back to the physical key it was pressed on.
 
 use std::collections::BTreeMap;
 
 use rune::{Key, KeyEvent, PhysicalKeyCode, Shortcut};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Action {
-    PlayPause,
-    Present,
-    Mute,
-    Loop,
-    Preview,
-    Cursor,
-    Open,
-    Restart,
-    SeekBack,
-    SeekBackFast,
-    SeekForward,
-    SeekForwardFast,
-    VolumeUp,
-    VolumeDown,
-    Close,
-}
+/// Open is the one chord that differs by platform; the rest are the same everywhere.
+#[cfg(target_os = "macos")]
+const OPEN_CHORD: &str = "super+o";
+#[cfg(not(target_os = "macos"))]
+const OPEN_CHORD: &str = "ctrl+o";
 
-impl Action {
-    pub const ALL: [Action; 15] = [
-        Action::PlayPause,
-        Action::Present,
-        Action::Mute,
-        Action::Loop,
-        Action::Preview,
-        Action::Cursor,
-        Action::Open,
-        Action::Restart,
-        Action::SeekBack,
-        Action::SeekBackFast,
-        Action::SeekForward,
-        Action::SeekForwardFast,
-        Action::VolumeUp,
-        Action::VolumeDown,
-        Action::Close,
-    ];
+/// Declares the actions once: the enum, [`Action::ALL`] and every default chord.
+macro_rules! actions {
+    ($($variant:ident => $chord:expr),+ $(,)?) => {
+        /// One command, whichever window asks for it.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum Action {
+            $($variant),+
+        }
 
-    /// Chords that must match with or without Shift held, because Shift is part of the keystroke
-    /// rather than a modifier the action cares about.
-    fn ignores_shift(self) -> bool {
-        false
-    }
+        impl Action {
+            pub const ALL: &'static [Action] = &[$(Action::$variant),+];
 
-    fn default_chord(self) -> &'static str {
-        match self {
-            Action::PlayPause => "space",
-            Action::Present => "f",
-            Action::Mute => "m",
-            Action::Loop => "l",
-            Action::Preview => "v",
-            Action::Cursor => "c",
-            Action::Open => {
-                if cfg!(target_os = "macos") {
-                    "super+o"
-                } else {
-                    "ctrl+o"
+            fn default_chord(self) -> &'static str {
+                match self {
+                    $(Action::$variant => $chord),+
                 }
             }
-            Action::Restart => "home",
-            Action::SeekBack => "left",
-            Action::SeekBackFast => "shift+left",
-            Action::SeekForward => "right",
-            Action::SeekForwardFast => "shift+right",
-            Action::VolumeUp => "up",
-            Action::VolumeDown => "down",
-            Action::Close => "escape",
         }
-    }
+    };
 }
 
+actions! {
+    PlayPause => "space",
+    Present => "f",
+    Mute => "m",
+    Loop => "l",
+    Preview => "v",
+    Cursor => "c",
+    Open => OPEN_CHORD,
+    Restart => "home",
+    SeekBack => "left",
+    SeekBackFast => "shift+left",
+    SeekForward => "right",
+    SeekForwardFast => "shift+right",
+    VolumeUp => "up",
+    VolumeDown => "down",
+    Close => "escape",
+}
+
+/// The chord each action answers to.
 pub struct Keybinds {
     chords: BTreeMap<Action, Shortcut>,
 }
 
-impl Default for Keybinds {
-    fn default() -> Self {
-        Self::defaults()
-    }
-}
-
 impl Keybinds {
-    pub fn defaults() -> Keybinds {
-        Keybinds {
-            chords: default_chords(),
+    pub fn defaults() -> Self {
+        let mut chords = BTreeMap::new();
+        for action in Action::ALL.iter().copied() {
+            match action.default_chord().parse::<Shortcut>() {
+                Ok(chord) => {
+                    chords.insert(action, chord);
+                }
+                // A chord that no longer parses would silently unbind its action.
+                Err(_) => debug_assert!(
+                    false,
+                    "{action:?} has an invalid default chord: {}",
+                    action.default_chord()
+                ),
+            }
         }
+        Self { chords }
     }
 
-    fn chord(&self, action: Action) -> Option<&Shortcut> {
-        self.chords.get(&action)
-    }
-
-    pub fn matches(&self, action: Action, event: &KeyEvent) -> bool {
-        self.chord(action)
-            .is_some_and(|chord| matches(chord, event, action.ignores_shift()))
+    /// The action `event` asks for, if this table binds it.
+    pub fn action_for(&self, event: &KeyEvent) -> Option<Action> {
+        Action::ALL.iter().copied().find(|action| {
+            self.chords
+                .get(action)
+                .is_some_and(|chord| matches(chord, event))
+        })
     }
 }
 
-fn default_chords() -> BTreeMap<Action, Shortcut> {
-    let mut chords = BTreeMap::new();
-    for action in Action::ALL {
-        if let Some(chord) = default_shortcut(action) {
-            chords.insert(action, chord);
-        }
-    }
-    chords
-}
-
-fn default_shortcut(action: Action) -> Option<Shortcut> {
-    let text = action.default_chord();
-    match text.parse::<Shortcut>() {
-        Ok(chord) => Some(chord),
-        Err(_) => {
-            debug_assert!(false, "{action:?} has an invalid default chord: {text}");
-            None
-        }
-    }
-}
-
-fn matches(chord: &Shortcut, event: &KeyEvent, ignore_shift: bool) -> bool {
+fn matches(chord: &Shortcut, event: &KeyEvent) -> bool {
     let want = chord.modifiers();
     let held = event.mods;
     let logo = cfg!(target_os = "macos") || want.logo == held.logo;
-    if (want.shift != held.shift && !ignore_shift)
+    if want.shift != held.shift
         || want.alt != held.alt
         || want.cmd != held.cmd
         || want.ctrl != held.ctrl
@@ -143,8 +101,8 @@ fn matches(chord: &Shortcut, event: &KeyEvent, ignore_shift: bool) -> bool {
     physical(&event.key) == Some(chord.physical_key())
 }
 
-// Rune matches accelerators by physical position, so the logical key an event carries is mapped
-// back to it.
+/// Rune matches accelerators by physical position, so the logical key an event carries is mapped
+/// back to it.
 fn physical(key: &Key) -> Option<PhysicalKeyCode> {
     use PhysicalKeyCode as Code;
     Some(match key {

@@ -176,8 +176,9 @@ sample-aspect-ratio files (old anamorphic content) are not un-squeezed.
 - Sound runs through a second ffmpeg piped into `cpal`'s default output device, with a 250 ms ring
   buffer. If the device or the track is unavailable the picture continues and the control window
   says why.
-- `src/media.rs` finds ffmpeg and builds the commands, `src/player.rs` is the clock and decode
-  thread, `src/ui.rs` the two windows, `src/settings.rs` the saved state, `src/audio.rs` the sound.
+- `src/media.rs` finds ffmpeg and builds the commands, `src/player/` is the clock and the decode
+  thread, `src/control/` the control window, `src/projection/` the projector, `src/settings.rs`
+  the saved state, `src/audio.rs` the sound.
 
 ## Limits
 

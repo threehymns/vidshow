@@ -1,18 +1,14 @@
 //! What the control window draws: the header, the stage, the seek bar and the transport.
-//!
-//! The marks at the top are drawn here because the icon catalog has no monitor, repeat or speaker
-//! glyph; everything else comes from the kit.
 
-use super::{Presenter, pick_file};
-use crate::settings::DisplayKey;
-use rune::{Color, Cx, Display, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
+use super::{Overlay, Presenter};
+use rune::{Color, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Progress, Select,
 };
 use rune_theme_opencode::icons as oc;
 
-/// The marks OpenCode's icon catalog has no glyph for — the display picker's monitor and the two
-/// playback toggles — drawn on the catalog's own grid: 16pt, 1pt stroke.
+/// The marks OpenCode's icon catalog has no glyph for — the display picker's monitor, and loop and
+/// sound in both their states — drawn on the catalog's own grid: 16pt, 1pt stroke.
 static MONITOR: Icon = Icon {
     name: "vidshow-monitor",
     view: 16.0,
@@ -61,45 +57,24 @@ pub fn clock(seconds: f64) -> String {
     }
 }
 
-/// How a display is named in the picker: "2 · 1920×1080 (primary)".
-fn display_label(display: &Display, index: usize) -> String {
-    let key = DisplayKey::of(display);
-    let mut label = format!("{} · {}", index + 1, key.resolution());
-    if display.primary {
-        label.push_str(" (primary)");
-    }
-    label
-}
-
-/// Loop as a toggle button: as on a player, on and off are different marks, and the brightness
-/// follows the same state.
-fn loop_button(k: &Kit, s: &Presenter) -> El {
-    let on = s.cfg.looping;
-    IconButton::new(if on { &LOOP } else { &LOOP_OFF })
+/// A player-style toggle: the glyph, the brightness and the tooltip all follow one flag, so an
+/// option that is off never looks like one that is on.
+fn toggle_button(
+    k: &Kit,
+    on: bool,
+    icons: (&'static Icon, &'static Icon),
+    help: (&'static str, &'static str),
+    press: fn(&mut Presenter),
+) -> El {
+    IconButton::new(if on { icons.0 } else { icons.1 })
         .variant(if on {
             IconButtonVariant::Ghost
         } else {
             IconButtonVariant::GhostMuted
         })
         .control_size(ControlSize::Large)
-        .help(if on { "Loop on" } else { "Loop off" })
-        .on_press(Presenter::toggle_loop)
-        .build(k)
-}
-
-/// Sound as a toggle button: the glyph and the brightness both follow it, so muted never looks
-/// like playing in silence.
-fn sound_button(k: &Kit, s: &Presenter) -> El {
-    let on = !s.cfg.muted;
-    IconButton::new(if on { &SPEAKER } else { &SPEAKER_MUTED })
-        .variant(if on {
-            IconButtonVariant::Ghost
-        } else {
-            IconButtonVariant::GhostMuted
-        })
-        .control_size(ControlSize::Large)
-        .help(if on { "Sound on" } else { "Sound off" })
-        .on_press(Presenter::toggle_mute)
+        .help(if on { help.0 } else { help.1 })
+        .on_press(press)
         .build(k)
 }
 
@@ -123,7 +98,7 @@ fn seek_bar(k: &Kit, s: &Presenter, duration: f64, progress: f32) -> El {
             match drag.phase {
                 Phase::Down | Phase::Up => {
                     s.scrub = None;
-                    if let Some(player) = &s.player {
+                    if let Some(player) = s.clip.player() {
                         player.seek_fraction(fraction);
                     }
                 }
@@ -134,7 +109,7 @@ fn seek_bar(k: &Kit, s: &Presenter, duration: f64, progress: f32) -> El {
 
 pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
-    let (time, duration, progress, playing) = match &s.player {
+    let (time, duration, progress, playing) = match s.clip.player() {
         Some(player) => (
             player.time(),
             player.duration(),
@@ -145,21 +120,10 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
     };
     let shown_time = s.scrub.map(|fraction| fraction * duration).unwrap_or(time);
 
-    let file_name = s
-        .player
-        .as_ref()
-        .map(|player| player.info.title.clone())
-        .or_else(|| {
-            s.path.as_ref().and_then(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            })
-        });
-
     // The clip's own details (size, frame rate, audio) hang off an info icon beside the title.
     let mut title = row().gap(4.0).center_y();
-    if let Some(name) = &file_name {
-        title = title.child(text(name.clone()).font(k.ty.ui).color(k.c.text_base));
+    if let Some(player) = s.clip.player() {
+        title = title.child(text(player.info.title()).font(k.ty.ui).color(k.c.text_base));
     }
     if let Some(info) = s.video_info() {
         // A plain mark in a fixed box: no button chrome, and nothing to mis-centre.
@@ -173,15 +137,10 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
         );
     }
 
-    let selected = s.cfg.resolve(&s.displays);
-    let labels: Vec<String> = s
-        .displays
-        .iter()
-        .enumerate()
-        .map(|(index, display)| display_label(display, index))
-        .collect();
+    let selected = s.selected_display();
+    let labels = s.display_labels();
     // With no display there is nothing to pick from, so the listbox never opens.
-    let open = s.picker_open && !s.displays.is_empty();
+    let open = s.overlay == Overlay::DisplayPicker && !labels.is_empty();
     // The listbox is mounted as an overlay, above the rest of the control window.
     let mut layer = Vec::new();
     let trigger = row()
@@ -196,20 +155,20 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 .open(open)
                 .on_toggle(|s: &mut Presenter| {
                     if !s.displays.is_empty() {
-                        s.picker_open = !s.picker_open;
+                        s.overlay = if s.overlay == Overlay::DisplayPicker {
+                            Overlay::None
+                        } else {
+                            Overlay::DisplayPicker
+                        };
                     }
                 })
-                .on_close(|s: &mut Presenter| s.picker_open = false)
-                .on_choose(|s: &mut Presenter, value: &str, _tx: &mut Tx| {
-                    let index = s
-                        .displays
-                        .iter()
-                        .enumerate()
-                        .position(|(index, display)| display_label(display, index) == value);
-                    if let Some(index) = index {
-                        s.choose_display(index);
-                        s.picker_open = false;
+                .on_close(|s: &mut Presenter| {
+                    if s.overlay == Overlay::DisplayPicker {
+                        s.overlay = Overlay::None;
                     }
+                })
+                .on_choose(|s: &mut Presenter, value: &str, _tx: &mut Tx| {
+                    s.choose_display_label(value);
                 })
                 .build(k, &mut layer),
         );
@@ -226,13 +185,13 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
             IconButton::new(&oc::SETTINGS_GEAR)
                 .control_size(ControlSize::Large)
                 .help("Settings")
-                .on_press(|s: &mut Presenter| s.settings_open = true)
+                .on_press(|s: &mut Presenter| s.overlay = Overlay::Settings)
                 .build(k),
         )
         .child(
             Button::new("Open…")
                 .control_size(ControlSize::Large)
-                .on_press_tx(pick_file)
+                .on_press_tx(Presenter::pick)
                 .build(k),
         )
         .child(if s.presenting {
@@ -248,7 +207,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 .build(k)
         });
 
-    let stage = match &s.player {
+    let stage = match s.clip.player() {
         Some(player) if s.cfg.preview => el()
             .key("stage")
             .w_full()
@@ -263,7 +222,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                     .h_full()
                     .native_surface(player.preview_surface(), s.cfg.fit.surface()),
             )
-            .on_press(Presenter::play_pause),
+            .on_press(Presenter::toggle_playing),
         _ => el()
             .key("stage")
             .w_full()
@@ -273,7 +232,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
             .fill(Color::BLACK)
             .center()
             .child(
-                text(if s.player.is_some() {
+                text(if s.clip.player().is_some() {
                     "Preview is off"
                 } else {
                     "Drop a video file here"
@@ -281,7 +240,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 .font(k.ty.ui_medium)
                 .color(k.c.text_muted),
             )
-            .on_press(Presenter::play_pause),
+            .on_press(Presenter::toggle_playing),
     };
 
     let scrub_row = row()
@@ -299,24 +258,30 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
         .child(
             Button::new(if playing { "Pause" } else { "Play" })
                 .control_size(ControlSize::Large)
-                .on_press(Presenter::play_pause)
+                .on_press(Presenter::toggle_playing)
                 .build(k),
         )
         .child(spacer())
-        .child(loop_button(k, s))
-        .child(sound_button(k, s))
+        .child(toggle_button(
+            k,
+            s.cfg.looping,
+            (&LOOP, &LOOP_OFF),
+            ("Loop on", "Loop off"),
+            Presenter::toggle_loop,
+        ))
+        .child(toggle_button(
+            k,
+            !s.cfg.muted,
+            (&SPEAKER, &SPEAKER_MUTED),
+            ("Sound on", "Sound off"),
+            Presenter::toggle_mute,
+        ))
         .child(
             Button::new(s.cfg.fit.label())
                 .control_size(ControlSize::Large)
                 .on_press(Presenter::toggle_fit)
                 .build(k),
         );
-
-    // Errors are the only standing text: everything else is a control or the picture.
-    let problem = s
-        .error
-        .as_deref()
-        .or_else(|| s.tools.as_ref().err().map(String::as_str));
 
     let mut root = col()
         .w_full()
@@ -333,13 +298,14 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 s.open(first.clone());
             }
         });
-    if let Some(problem) = problem {
+    // Errors are the only standing text: everything else is a control or the picture.
+    if let Some(problem) = s.problem() {
         root = root.child(
             text(problem)
                 .font(k.ty.text_xsmall_medium)
                 .color(k.c.danger.fg),
         );
     }
-    crate::settings_window::settings_window(s, k, &mut layer);
+    super::settings_popup::settings_window(s, k, &mut layer);
     rune_kit::root(root, layer)
 }

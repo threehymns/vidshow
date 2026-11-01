@@ -25,16 +25,56 @@ mod imp {
         cap: usize,
     }
 
+    /// Whether the device is taking samples.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Running,
+        Paused,
+        Stopped,
+    }
+
     struct Ctl {
-        paused: bool,
+        phase: Phase,
         seek: Option<f64>,
-        stop: bool,
+    }
+
+    /// What the reader thread, the audio callback and the player all share.
+    #[derive(Clone)]
+    struct Shared {
+        ctl: Arc<Mutex<Ctl>>,
+        ring: Arc<Mutex<Ring>>,
+        process: Arc<Mutex<Option<Child>>>,
+        /// What went wrong with the decoder, for the control window to say.
+        note: Arc<Mutex<Option<String>>>,
+    }
+
+    impl Shared {
+        /// Stops the decoder ffmpeg, reaping it so the next one can start straight away.
+        fn stop_process(&self) {
+            if let Ok(mut process) = self.process.lock()
+                && let Some(mut child) = process.take()
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+
+        /// Keeps a problem for the control window instead of dropping it.
+        fn record(&self, text: impl Into<String>) {
+            let text = text.into();
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            if let Ok(mut note) = self.note.lock() {
+                *note = Some(text);
+            }
+        }
     }
 
     pub struct Audio {
-        ctl: Arc<Mutex<Ctl>>,
+        shared: Shared,
         gain: Arc<AtomicU32>,
-        process: Arc<Mutex<Option<Child>>>,
         reader: Option<std::thread::JoinHandle<()>>,
         host: Option<std::thread::JoinHandle<()>>,
         host_stop: Arc<AtomicBool>,
@@ -46,21 +86,28 @@ mod imp {
             if !info.has_audio {
                 return Err("this file has no audio track".into());
             }
-            let ctl = Arc::new(Mutex::new(Ctl {
-                paused: true,
-                seek: None,
-                stop: false,
-            }));
+            let shared = Shared {
+                ctl: Arc::new(Mutex::new(Ctl {
+                    phase: Phase::Paused,
+                    seek: None,
+                })),
+                ring: Arc::new(Mutex::new(Ring {
+                    samples: VecDeque::new(),
+                    cap: 1,
+                })),
+                process: Arc::new(Mutex::new(None)),
+                note: Arc::new(Mutex::new(None)),
+            };
             let gain = Arc::new(AtomicU32::new(1f32.to_bits()));
-            let ring = Arc::new(Mutex::new(Ring {
-                samples: VecDeque::new(),
-                cap: 1,
-            }));
             let host_stop = Arc::new(AtomicBool::new(false));
             let (ready_tx, ready_rx) = mpsc::channel();
             let host = {
-                let (ring, ctl, gain, host_stop) =
-                    (ring.clone(), ctl.clone(), gain.clone(), host_stop.clone());
+                let (ring, ctl, gain, host_stop) = (
+                    shared.ring.clone(),
+                    shared.ctl.clone(),
+                    gain.clone(),
+                    host_stop.clone(),
+                );
                 std::thread::spawn(move || host_loop(ready_tx, ring, ctl, gain, host_stop))
             };
             let (rate, channels) = match ready_rx.recv_timeout(Duration::from_secs(8)) {
@@ -74,21 +121,18 @@ mod imp {
                     return Err("the audio device did not start".into());
                 }
             };
-            if let Ok(mut r) = ring.lock() {
-                r.cap = (rate as usize * channels as usize * BUFFER_MS as usize / 1000).max(1024);
+            if let Ok(mut ring) = shared.ring.lock() {
+                ring.cap =
+                    (rate as usize * channels as usize * BUFFER_MS as usize / 1000).max(1024);
             }
-            let process = Arc::new(Mutex::new(None));
             let reader = {
-                let (process, ring, ctl) = (process.clone(), ring.clone(), ctl.clone());
+                let shared = shared.clone();
                 let (tools, info) = (tools.clone(), info.clone());
-                std::thread::spawn(move || {
-                    reader_loop(tools, info, start, rate, channels, ctl, ring, process)
-                })
+                std::thread::spawn(move || reader_loop(tools, info, start, rate, channels, shared))
             };
             Ok(Self {
-                ctl,
+                shared,
                 gain,
-                process,
                 reader: Some(reader),
                 host: Some(host),
                 host_stop,
@@ -96,41 +140,39 @@ mod imp {
         }
 
         pub fn play(&self) {
-            if let Ok(mut ctl) = self.ctl.lock() {
-                ctl.paused = false;
+            if let Ok(mut ctl) = self.shared.ctl.lock() {
+                ctl.phase = Phase::Running;
             }
         }
 
         pub fn pause(&self) {
-            if let Ok(mut ctl) = self.ctl.lock() {
-                ctl.paused = true;
+            if let Ok(mut ctl) = self.shared.ctl.lock() {
+                ctl.phase = Phase::Paused;
             }
         }
 
         pub fn seek(&self, seconds: f64) {
-            if let Ok(mut ctl) = self.ctl.lock() {
+            if let Ok(mut ctl) = self.shared.ctl.lock() {
                 ctl.seek = Some(seconds.max(0.0));
             }
-            if let Ok(mut process) = self.process.lock() {
-                if let Some(child) = process.as_mut() {
-                    let _ = child.kill();
-                }
-            }
+            // The reader starts the next ffmpeg at the new place.
+            self.shared.stop_process();
         }
 
         pub fn set_gain(&self, gain: f32) {
             self.gain.store(gain.clamp(0.0, 1.0).to_bits(), SeqCst);
         }
 
+        /// Anything the decoder said, for the control window.
+        pub fn note(&self) -> Option<String> {
+            self.shared.note.lock().ok().and_then(|note| note.clone())
+        }
+
         pub fn stop(&mut self) {
-            if let Ok(mut ctl) = self.ctl.lock() {
-                ctl.stop = true;
+            if let Ok(mut ctl) = self.shared.ctl.lock() {
+                ctl.phase = Phase::Stopped;
             }
-            if let Ok(mut process) = self.process.lock() {
-                if let Some(child) = process.as_mut() {
-                    let _ = child.kill();
-                }
-            }
+            self.shared.stop_process();
             self.host_stop.store(true, SeqCst);
             if let Some(reader) = self.reader.take() {
                 let _ = reader.join();
@@ -171,23 +213,26 @@ mod imp {
         };
         let config: cpal::StreamConfig = supported.config();
         let (rate, channels) = (config.sample_rate.0, config.channels);
-        let paused = {
+        let silent = {
             let ctl = ctl.clone();
-            move || ctl.lock().map(|c| c.paused).unwrap_or(true)
+            move || {
+                ctl.lock()
+                    .map(|c| c.phase != Phase::Running)
+                    .unwrap_or(true)
+            }
         };
         let stream = device.build_output_stream::<f32, _, _>(
             &config,
             {
                 let ring = ring.clone();
                 let gain = gain.clone();
-                let paused = paused.clone();
+                let silent = silent.clone();
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let silent = paused();
-                    let level = f32::from_bits(gain.load(SeqCst));
-                    if silent {
+                    if silent() {
                         data.fill(0.0);
                         return;
                     }
+                    let level = f32::from_bits(gain.load(SeqCst));
                     match ring.try_lock() {
                         Ok(mut ring) => {
                             for sample in data.iter_mut() {
@@ -228,56 +273,51 @@ mod imp {
         start: f64,
         rate: u32,
         channels: u16,
-        ctl: Arc<Mutex<Ctl>>,
-        ring: Arc<Mutex<Ring>>,
-        process: Arc<Mutex<Option<Child>>>,
+        shared: Shared,
     ) {
         let mut pending_start = Some(start);
         let mut stdout: Option<std::process::ChildStdout> = None;
+        let mut log: Option<crate::media::Stderr> = None;
         let mut finished = false;
         let mut buffer = vec![0u8; 16 * 1024];
 
         loop {
-            let (stop, paused, seek) = {
-                let Ok(mut ctl) = ctl.lock() else { return };
-                (ctl.stop, ctl.paused, ctl.seek.take())
+            let (stopped, paused, seek) = {
+                let Ok(mut ctl) = shared.ctl.lock() else {
+                    return;
+                };
+                (
+                    ctl.phase == Phase::Stopped,
+                    ctl.phase == Phase::Paused,
+                    ctl.seek.take(),
+                )
             };
-            if stop {
-                if let Ok(mut process) = process.lock() {
-                    if let Some(mut child) = process.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                }
+            if stopped {
+                shared.stop_process();
                 return;
             }
             if let Some(seconds) = seek {
                 pending_start = Some(seconds);
                 finished = false;
                 stdout = None;
-                if let Ok(mut process) = process.lock() {
-                    if let Some(mut child) = process.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                }
-                if let Ok(mut ring) = ring.lock() {
+                shared.stop_process();
+                if let Ok(mut ring) = shared.ring.lock() {
                     ring.samples.clear();
                 }
             }
             if let Some(seconds) = pending_start.take() {
                 match media::spawn_audio(&tools, &info, seconds, rate, channels) {
-                    Ok((mut child, log)) => {
+                    Ok((mut child, stderr)) => {
                         stdout = child.stdout.take();
-                        if let Ok(mut process) = process.lock() {
+                        log = Some(stderr);
+                        if let Ok(mut process) = shared.process.lock() {
                             *process = Some(child);
                         }
-                        // Surfaces a decode error once, without stopping the picture.
-                        let _log = log;
                     }
-                    Err(_) => {
+                    Err(error) => {
                         stdout = None;
                         finished = true;
+                        shared.record(error);
                     }
                 }
             }
@@ -297,18 +337,20 @@ mod imp {
             // Wait for the device to drain the ring, so ffmpeg is paced by playback rather than
             // decoding the whole track into memory.
             loop {
-                let full = ring
+                let full = shared
+                    .ring
                     .lock()
                     .is_ok_and(|ring| ring.samples.len() + 2048 > ring.cap);
                 if !full {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
-                let (stop, seek) = ctl
+                let (stopped, seek) = shared
+                    .ctl
                     .lock()
-                    .map(|c| (c.stop, c.seek.is_some()))
+                    .map(|c| (c.phase == Phase::Stopped, c.seek.is_some()))
                     .unwrap_or((true, false));
-                if stop || seek {
+                if stopped || seek {
                     break;
                 }
             }
@@ -317,24 +359,33 @@ mod imp {
                 Ok(0) => {
                     stdout = None;
                     finished = true;
-                    if let Ok(mut process) = process.lock() {
-                        if let Some(mut child) = process.take() {
-                            let _ = child.wait();
-                        }
+                    if let Ok(mut process) = shared.process.lock()
+                        && let Some(mut child) = process.take()
+                    {
+                        let _ = child.wait();
                     }
                 }
                 Ok(n) => {
-                    if let Ok(mut ring) = ring.lock() {
-                        for chunk in buffer[..n].chunks_exact(4) {
-                            ring.samples.push_back(f32::from_le_bytes([
-                                chunk[0], chunk[1], chunk[2], chunk[3],
-                            ]));
+                    if let Ok(mut ring) = shared.ring.lock() {
+                        let (samples, _rest) = buffer[..n].as_chunks::<4>();
+                        for chunk in samples {
+                            ring.samples.push_back(f32::from_le_bytes(*chunk));
                         }
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     stdout = None;
                     finished = true;
+                    // The picture carries on; the control window says what ffmpeg complained of.
+                    let said = log
+                        .as_ref()
+                        .and_then(|log| log.lock().ok().map(|text| text.trim().to_string()))
+                        .unwrap_or_default();
+                    shared.record(if said.is_empty() {
+                        error.to_string()
+                    } else {
+                        said
+                    });
                 }
             }
         }
@@ -356,6 +407,9 @@ mod imp {
         pub fn pause(&self) {}
         pub fn seek(&self, _seconds: f64) {}
         pub fn set_gain(&self, _gain: f32) {}
+        pub fn note(&self) -> Option<String> {
+            None
+        }
         pub fn stop(&mut self) {}
     }
 }
