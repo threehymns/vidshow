@@ -163,6 +163,7 @@ fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
         projection,
         wakers: wakers.clone(),
         notice: settings_problem,
+        dismissed: None,
         startup: Some(startup),
         scrub: None,
     });

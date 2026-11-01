@@ -78,6 +78,9 @@ pub struct Presenter {
     /// The latest problem the window itself knows about: a save that failed, an unreadable settings
     /// file, an argument vidshow could not follow. The clip's own errors are read from the clip.
     pub notice: Option<String>,
+    /// The problem whose toast was closed. A later problem replaces it and shows again; the same
+    /// one stays closed, so a standing failure does not keep coming back.
+    pub dismissed: Option<String>,
     /// A file from the command line, opened once the event loop is up.
     pub startup: Option<Startup>,
     /// While the pointer drags the seek bar: the fraction it is over.
@@ -145,6 +148,7 @@ impl Presenter {
         // Drops the previous clip first: that stops its decoder and audio threads.
         self.clip = Clip::None;
         self.notice = None;
+        self.dismissed = None;
         let loaded = match &self.tools {
             Ok(tools) => Player::load(tools, &path, self.wakers.clone()),
             Err(error) => Err(error.clone()),
@@ -229,12 +233,13 @@ impl Presenter {
 
     pub fn start_presenting(&mut self) {
         let Some(index) = self.selected_display() else {
-            self.notice = Some("no display is available to present on".into());
+            self.report("no display is available to present on".into());
             return;
         };
         let display = self.displays[index].clone();
         self.projection.show(&display);
         self.notice = None;
+        self.dismissed = None;
         // Presenting a paused clip means showing it.
         if let Some(player) = self.clip.player()
             && player.state() == State::Paused
@@ -333,6 +338,24 @@ impl Presenter {
             .or_else(|| self.tools.as_ref().err().cloned())
     }
 
+    /// The problem the error toast should be showing: the latest one, unless it was closed and
+    /// nothing newer has gone wrong since.
+    pub fn toast(&self) -> Option<String> {
+        self.problem()
+            .filter(|problem| self.dismissed.as_deref() != Some(problem.as_str()))
+    }
+
+    /// Records a problem and makes sure its toast is up, even when it repeats one that was closed.
+    fn report(&mut self, problem: String) {
+        self.notice = Some(problem);
+        self.dismissed = None;
+    }
+
+    /// Closes the error toast for the problem it is showing. A new problem raises a new one.
+    pub fn dismiss_problem(&mut self) {
+        self.dismissed = self.problem();
+    }
+
     /// Pushes the settings onto the clip and the projector, and saves them. Every control ends
     /// here, so none of them has to know which of the two cares about what it changed.
     fn apply(&mut self) {
@@ -353,7 +376,7 @@ impl Presenter {
     /// Persists the settings, showing a failure rather than dropping it.
     fn save(&mut self) {
         if let Err(error) = self.cfg.save() {
-            self.notice = Some(error);
+            self.report(error);
         }
     }
 
@@ -391,7 +414,7 @@ impl Presenter {
         tx.open_file(options, |s: &mut Presenter, result, _tx| match result {
             Ok(Some(path)) => s.load(path),
             Ok(None) => {}
-            Err(error) => s.notice = Some(format!("the file dialog failed: {}", error.0)),
+            Err(error) => s.report(format!("the file dialog failed: {}", error.0)),
         });
     }
 }
@@ -412,7 +435,7 @@ pub fn presenter_setup(s: &mut Presenter, waker: rune::Waker) {
         return;
     };
     if let Some(problem) = startup.problem {
-        s.notice = Some(problem);
+        s.report(problem);
     }
     if let Some(path) = startup.file {
         if startup.autoplay {

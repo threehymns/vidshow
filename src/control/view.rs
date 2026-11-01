@@ -5,6 +5,7 @@ use super::{Overlay, Presenter};
 use rune::{Color, Cursor, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Progress, Select,
+    Toast, ToastRegion,
 };
 use rune_theme_opencode::icons as oc;
 
@@ -71,7 +72,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
     // Panels that float above the window are collected while the rest is built.
     let mut layer = Vec::new();
-    let mut root = col()
+    let root = col()
         .w_full()
         .h_full()
         .fill(k.c.bg_deep)
@@ -86,16 +87,25 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
                 s.load(first.clone());
             }
         });
-    // Errors are the only standing text: everything else is a control or the picture.
-    if let Some(problem) = s.problem() {
-        root = root.child(
-            text(problem.as_str())
-                .font(k.ty.text_xsmall_medium)
-                .color(k.c.danger.fg),
-        );
-    }
     settings_popup::settings_window(s, k, &mut layer);
+    // Last into the layer, so a toast sits above whatever panel is open.
+    problem_toast(s, k, &mut layer);
     rune_kit::root(root, layer)
+}
+
+/// The one thing wrong, in the corner: every error the window knows about arrives here rather
+/// than taking up room in the layout. Closing it keeps that error away until something else goes
+/// wrong.
+fn problem_toast(s: &Presenter, k: &Kit, layer: &mut Vec<El>) {
+    let Some(problem) = s.toast() else {
+        return;
+    };
+    let toast = Toast::new("problem", "Problem")
+        .description(problem)
+        .lead(icon(&oc::WARNING, 16.0).color(k.c.danger.fg))
+        .on_close(|s: &mut Presenter| s.dismiss_problem())
+        .build(k);
+    layer.push(ToastRegion::new().toast(toast).build(k));
 }
 
 /// The clip's name and details, the display picker, and the window's own buttons.
