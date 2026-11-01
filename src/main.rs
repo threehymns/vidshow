@@ -136,6 +136,7 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
         cfg,
         displays,
         presenting: false,
+        picker_open: false,
         projection,
         wakers: wakers.clone(),
         pending: file,

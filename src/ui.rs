@@ -11,8 +11,9 @@ use crate::player::{Player, State, Wakers};
 use crate::settings::{DisplayKey, FitMode, Settings, TargetDisplay};
 use rune::tok::{self, type_};
 use rune::{
-    AppHandle, Color, Cursor, Cx, Display, DisplayTarget, Drag, El, FileDialogOptions, Key, KeyEvent,
-    OverlayHandle, OverlayPlacement, Phase, Tx, WindowHandle, col, el, row, spacer, text,
+    Align, AppHandle, Color, Cursor, Cx, Display, DisplayTarget, Drag, El, FileDialogOptions, Icon,
+    Key, KeyEvent, OverlayHandle, OverlayPlacement, Phase, Side, Tx, WindowHandle, col, el, icon,
+    row, spacer, text,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +28,13 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[
 const STOP: Color = Color { r: 0.80, g: 0.26, b: 0.26, a: 1.0 };
 const DANGER: Color = Color { r: 0.95, g: 0.45, b: 0.42, a: 1.0 };
 
+/// The caret on the display picker, drawn as a path so it does not depend on the font's glyphs.
+static CHEVRON_DOWN: Icon = Icon {
+    name: "vidshow-chevron-down",
+    view: 16.0,
+    body: r#"<path d="M5 6.5L8 9.5L11 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
 /// The control window.
 pub struct Presenter {
     pub tools: Result<Tools, String>,
@@ -36,6 +44,8 @@ pub struct Presenter {
     pub cfg: Settings,
     pub displays: Vec<Display>,
     pub presenting: bool,
+    /// Whether the "Present on" picker is open over the control window.
+    pub picker_open: bool,
     pub projection: Projector,
     pub wakers: Arc<Wakers>,
     /// A file from the command line, opened once the event loop is up.
@@ -184,6 +194,16 @@ fn toggle(label: impl Into<String>, on: bool) -> El {
 fn caption(label: impl Into<String>) -> El {
     let theme = tok::theme(true);
     text(label).font(type_::LABEL).color(theme.text_secondary)
+}
+
+/// How a display is named in the picker: "2 · 1920×1080 (primary)".
+fn display_label(display: &Display, index: usize) -> String {
+    let key = DisplayKey::of(display);
+    let mut label = format!("{} · {}", index + 1, key.resolution());
+    if display.primary {
+        label.push_str(" (primary)");
+    }
+    label
 }
 
 impl Presenter {
@@ -547,23 +567,39 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         .child(button(s.cfg.fit.label(), false).on_press(Presenter::toggle_fit));
 
     let selected = s.cfg.resolve(&s.displays);
-    let mut display_row = row()
+    // With no display there is nothing to pick from, so the picker never opens.
+    let open = s.picker_open && !s.displays.is_empty();
+    let trigger_label = match selected {
+        Some(index) => display_label(&s.displays[index], index),
+        None => "No display".to_string(),
+    };
+    let trigger = row()
+        .key("present_on")
+        .h(30.0)
+        .px(11.0)
+        .gap(8.0)
+        .radius(8.0)
+        .center_y()
+        .cursor(Cursor::Pointer)
+        .fill(if open { accent.alpha(0.9) } else { theme.control_off })
+        .child(text(trigger_label).font(type_::LABEL).color(if open { Color::WHITE } else { theme.text }))
+        .child(
+            icon(&CHEVRON_DOWN, 14.0)
+                .icon_rotation(if open { std::f32::consts::PI } else { 0.0 })
+                .color(if open { Color::WHITE } else { theme.text_secondary }),
+        )
+        .on_press(|s: &mut Presenter| {
+            if !s.displays.is_empty() {
+                s.picker_open = !s.picker_open;
+            }
+        });
+    let display_row = row()
         .gap(8.0)
         .center_y()
         .w_full()
         .flex_wrap()
-        .child(caption("Present on"));
-    for (index, display) in s.displays.iter().enumerate() {
-        let key = DisplayKey::of(display);
-        let mut label = format!("{} · {}", index + 1, key.resolution());
-        if display.primary {
-            label.push_str(" (primary)");
-        }
-        display_row = display_row.child(
-            toggle(label, selected == Some(index)).on_press(move |s: &mut Presenter| s.choose_display(index)),
-        );
-    }
-    let display_row = display_row
+        .child(caption("Present on"))
+        .child(trigger)
         .child(spacer())
         .child(toggle("On top", s.cfg.always_on_top).on_press(Presenter::toggle_on_top))
         .child(toggle("Preview", s.cfg.preview).on_press(Presenter::toggle_preview))
@@ -578,7 +614,36 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
         footer = footer.child(text(error).font(type_::LABEL).color(DANGER));
     }
 
-    col()
+    // The list itself: one row per display, the chosen one marked, hanging under the trigger.
+    let mut picker = col()
+        .key("present_on_picker")
+        .min_w(190.0)
+        .radius(8.0)
+        .fill(theme.control_off)
+        .padding(4.0)
+        .gap(2.0);
+    for (index, display) in s.displays.iter().enumerate() {
+        let on = selected == Some(index);
+        let label = display_label(display, index);
+        picker = picker.child(
+            row()
+                .key(format!("present_on_option{index}"))
+                .h(28.0)
+                .px(8.0)
+                .radius(6.0)
+                .center_y()
+                .cursor(Cursor::Pointer)
+                .fill(if on { accent.alpha(0.9) } else { theme.control_off })
+                .child(text(label).font(type_::LABEL).color(if on { Color::WHITE } else { theme.text }))
+                .on_press(move |s: &mut Presenter| {
+                    s.choose_display(index);
+                    s.picker_open = false;
+                }),
+        );
+    }
+    let picker = picker.anchored("present_on", Side::Bottom, Align::Start, 6.0);
+
+    let mut root = col()
         .w_full()
         .h_full()
         .fill(theme.bg)
@@ -595,7 +660,22 @@ pub fn presenter_view(s: &Presenter, _cx: &mut Cx<Presenter>) -> El {
             if let Some(first) = files.first() {
                 s.open(first.clone());
             }
-        })
+        });
+    if open {
+        // The list hangs under its trigger; the transparent scrim catches presses outside it, so
+        // they close the picker instead of reaching the controls underneath.
+        root = root
+            .child(
+                el()
+                    .key("present_on_scm")
+                    .absolute(0.0, 0.0)
+                    .w_full()
+                    .h_full()
+                    .on_press(|s: &mut Presenter| s.picker_open = false),
+            )
+            .child(picker);
+    }
+    root
 }
 
 pub fn projection_view(p: &Projection, _cx: &mut Cx<Projection>) -> El {
@@ -699,7 +779,11 @@ pub fn presenter_key(s: &mut Presenter, event: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
-            if s.presenting {
+            // Escape closes the open picker first; only then does it stop presenting.
+            if s.picker_open {
+                s.picker_open = false;
+                true
+            } else if s.presenting {
                 s.stop_presenting();
                 true
             } else {
