@@ -74,7 +74,7 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
     let mut root = col()
         .w_full()
         .h_full()
-        .fill(k.c.bg_base)
+        .fill(k.c.bg_deep)
         .padding(14.0)
         .gap(10.0)
         .child(header(s, k, &mut layer))
@@ -210,7 +210,7 @@ fn stage(s: &Presenter, k: &Kit) -> El {
             )
             .on_press(Presenter::toggle_playing),
         None => stage
-            .fill(k.c.bg_deep)
+            .fill(k.c.bg_base)
             .border(1.0, k.c.border_muted)
             .border_dash(7.0, 6.0)
             .hover(k.c.hover)
