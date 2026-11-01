@@ -16,7 +16,8 @@ delete that marker to keep them in `%APPDATA%\vidshow` instead.
 
 ## Requirements
 
-- **Windows 10/11** (the target; it also builds on Linux and macOS, where sound is not wired up yet).
+- **Windows 10/11** is the target. It also builds and runs on Linux (X11 and Wayland, with sound)
+  and on macOS (where video presents silently).
 - **ffmpeg and ffprobe**. vidshow looks for them in this order:
   1. `VIDSHOW_FFMPEG` — a folder containing both, or the `ffmpeg.exe` itself;
   2. beside `vidshow.exe`, or in `ffmpeg\`, `ffmpeg\bin\`, `bin\` beside it;
@@ -55,7 +56,8 @@ You can also drag a video onto the control window, use **Open…**, or start it 
   monitors the default is the secondary display; with one it stays on that display.
 - The projector is a borderless window sized and positioned to exactly cover its display, kept
   above other windows, with the mouse pointer hidden over it. It is not exclusive full screen, so
-  alt-tab, notifications and screen sharing behave normally.
+  alt-tab, notifications and screen sharing behave normally. On Wayland it is a layer-shell overlay
+  pinned to that display instead of a window (see [Linux](#linux)).
 - **Stop presenting** (or Escape, or closing the projector) hides it; the control window keeps
   playing, so you can check a moment before showing it again.
 - *Fit* letterboxes, *Fill* crops to cover the display. Both apply live, to the preview and the
@@ -83,6 +85,30 @@ starts: if you plug a monitor in while vidshow is running, restart it to see the
 ```
 
 `"display"` may also be `{ "mode": "secondary" }` (the default) or `{ "mode": "primary" }`.
+
+## Linux
+
+The control window and the projector both work on X11 and on Wayland, and sound plays through
+ALSA.
+
+- **On Wayland the projector is a layer-shell overlay** pinned to the display chosen under
+  *Present on*, covering it whole and sitting above ordinary windows. That is the one surface a
+  Wayland client can put on a chosen output: an ordinary window opens wherever the compositor
+  decides, which is normally the display the control window is on. Compositors with the
+  `wlr-layer-shell` protocol (sway, Hyprland, niri, river, KDE) get the overlay; GNOME has no such
+  protocol, so Rune falls back to an override-redirect XWayland window, which covers the display
+  too.
+- The trade is that the overlay is not a window: it is not in alt-tab or task switchers, and it
+  takes no keyboard focus. Keys go to the control window, which has all of them (Escape there stops
+  presenting); the projector-only shortcuts in the key table apply to the window, on Windows and
+  X11.
+- On X11 the projector is a borderless window placed on the chosen display exactly as on Windows,
+  and it maps at its exact size so a tiling window manager (i3, bspwm, dwm) floats it instead of
+  giving it a tile. Floating desktops just show a window that fills the display.
+- *On top* only applies to the window; a layer-shell overlay is already above ordinary windows.
+- Sound needs ALSA's development files at build time (`libasound2-dev` on Debian/Ubuntu,
+  `alsa-lib-devel` on Fedora) and a working default output device; without them the picture still
+  plays and the control window says why there is no sound.
 
 ## Open With in File Explorer
 
@@ -136,9 +162,12 @@ sample-aspect-ratio files (old anamorphic content) are not un-squeezed.
 
 ## How it works
 
-- Two Rune windows with separate state. The projector is created hidden at startup and placed with
-  `WindowHandle::place(DisplayTarget::Id(..), OverlayPlacement::FullScreen)` when you press Present,
-  so it never flashes on the wrong screen.
+- The projector is a separate Rune window with its own state, created hidden at startup and placed
+  with `WindowHandle::place(DisplayTarget::Id(..), OverlayPlacement::FullScreen)` when you press
+  Present, so it never flashes on the wrong screen. It is built with `App::float_on_open` so a
+  tiling window manager floats it rather than tiling it. On Wayland, where a window cannot be
+  placed, the projector is a Rune layer-shell overlay (`OverlaySpec` with
+  `OverlayPlacement::FullScreen` on the chosen display) instead.
 - Rune's built-in `Player` is macOS-only, so vidshow runs its own pipeline: `ffprobe` reports size,
   frame rate, rotation and duration; an ffmpeg process writes raw `bgra` frames to a pipe; a decode
   thread paces each frame against a monotonic clock and pushes it into Rune's `NativeSurface`
@@ -152,7 +181,9 @@ sample-aspect-ratio files (old anamorphic content) are not un-squeezed.
 
 ## Limits
 
-- Sound is Windows-only for now; elsewhere video presents silently and the control window says so.
+- Sound plays on Windows and Linux; on macOS video presents silently and the control window says so.
+- On Wayland the projector is a layer-shell overlay rather than a window: no alt-tab entry, and
+  keyboard control comes from the control window (see the Linux section).
 - No exclusive full screen on purpose (see above), so a screen saver or a "stay on top" window can
   still cover the projector.
 - A/V drift is not continuously corrected: audio and video are started together and left to run.

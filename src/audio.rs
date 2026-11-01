@@ -1,11 +1,11 @@
 //! Audio output for the presentation.
 //!
-//! Video goes through Rune's `NativeSurface`; sound has no Rune element on Windows (Rune's own
+//! Video goes through Rune's `NativeSurface`; sound has no Rune element to play it (Rune's own
 //! `Player` is macOS-only), so vidshow runs a second ffmpeg for the audio track and feeds the
-//! samples to the default output device through cpal. Any failure here is reported as a note in
-//! the control window: losing sound never stops the picture.
+//! samples to the default output device through cpal — WASAPI on Windows, ALSA on Linux. Any
+//! failure here is reported as a note in the control window: losing sound never stops the picture.
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 mod imp {
     use crate::media::{self, MediaInfo, Tools};
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -315,8 +315,8 @@ mod imp {
     }
 }
 
-/// Platforms other than Windows have no audio back end yet: video still presents, silently.
-#[cfg(not(windows))]
+/// Platforms without a cpal back end: video still presents, silently.
+#[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use crate::media::{MediaInfo, Tools};
 
@@ -324,7 +324,7 @@ mod imp {
 
     impl Audio {
         pub fn start(_tools: &Tools, _info: &MediaInfo, _start: f64) -> Result<Self, String> {
-            Err("sound is only implemented on Windows for now".into())
+            Err("sound is not available on this platform".into())
         }
         pub fn play(&self) {}
         pub fn pause(&self) {}

@@ -100,8 +100,8 @@ pub struct MediaInfo {
     pub fps_arg: String,
     /// Degrees clockwise to apply, 0/90/180/270.
     pub rotation: i32,
-    /// Read by the Windows audio backend; other platforms play silently.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Read by the audio back end; platforms without one play silently.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     pub has_audio: bool,
 }
 
@@ -231,7 +231,7 @@ fn spawn_with_stderr(mut command: Command) -> Result<(Child, Stderr), String> {
     Ok((child, log))
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn pipes(command: &mut Command, info: &MediaInfo, start: f64, map: &str, extra: &[&str]) {
     command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
     if start > 0.05 {
@@ -267,7 +267,7 @@ pub fn spawn_video(tools: &Tools, info: &MediaInfo, start: f64) -> Result<(Child
 }
 
 /// Starts decoding the first audio track to interleaved f32 PCM at the output device's rate.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub fn spawn_audio(tools: &Tools, info: &MediaInfo, start: f64, rate: u32, channels: u16) -> Result<(Child, Stderr), String> {
     let mut command = command(&tools.ffmpeg);
     pipes(

@@ -1,9 +1,10 @@
-//! The two windows: the control panel, and the projector that opens on the display you chose.
+//! The control panel, and the projector that opens on the display you chose.
 //!
-//! The control window is the one with every control; the projector is borderless, covers its
-//! display exactly and shows nothing but the picture — the same shape of thing as PowerPoint's
-//! presenter output or an OBS projector, without exclusive full screen mode, so alt-tabbing away
-//! and back behaves like any other window.
+//! The control window is the one with every control; the projector covers its display exactly
+//! and shows nothing but the picture — the same shape of thing as PowerPoint's presenter output
+//! or an OBS projector, without exclusive full screen mode. It is a window wherever a window can
+//! be placed (Windows, X11, macOS); on Wayland, which gives clients no say in where a window
+//! goes, it is a layer-shell overlay pinned to the chosen output instead.
 
 use crate::media::Tools;
 use crate::player::{Player, State, Wakers};
@@ -11,7 +12,7 @@ use crate::settings::{DisplayKey, FitMode, Settings, TargetDisplay};
 use rune::tok::{self, type_};
 use rune::{
     AppHandle, Color, Cursor, Cx, Display, DisplayTarget, Drag, El, FileDialogOptions, Key, KeyEvent,
-    OverlayPlacement, Phase, Tx, WindowHandle, col, el, row, spacer, text,
+    OverlayHandle, OverlayPlacement, Phase, Tx, WindowHandle, col, el, row, spacer, text,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,8 +36,7 @@ pub struct Presenter {
     pub cfg: Settings,
     pub displays: Vec<Display>,
     pub presenting: bool,
-    pub projection: WindowHandle,
-    pub projection_state: AppHandle<Projection>,
+    pub projection: Projector,
     pub wakers: Arc<Wakers>,
     /// A file from the command line, opened once the event loop is up.
     pub pending: Option<PathBuf>,
@@ -53,6 +53,92 @@ pub struct Projection {
     pub hide_cursor: bool,
     pub presenter: AppHandle<Presenter>,
     pub wakers: Arc<Wakers>,
+}
+
+/// A display's size in points: what window sizes are asked for in, and the size the projector
+/// window follows when you present on a different display.
+pub fn display_points(display: &Display) -> (f32, f32) {
+    let scale = if display.scale > 0.0 { display.scale } else { 1.0 };
+    (display.size.0 as f32 / scale as f32, display.size.1 as f32 / scale as f32)
+}
+
+/// How rune names a display, for placing a surface on it.
+pub fn display_target(display: &Display) -> DisplayTarget {
+    match &display.id {
+        Some(id) => DisplayTarget::Id(id.clone()),
+        None => DisplayTarget::Primary,
+    }
+}
+
+/// Where the picture goes. A window can be placed on a display by every platform vidshow runs on
+/// except Wayland, which leaves the output to the compositor; there the picture is a layer-shell
+/// overlay, the one surface a client can pin to a chosen output.
+pub enum Projector {
+    Window {
+        handle: WindowHandle,
+        state: AppHandle<Projection>,
+    },
+    Overlay(OverlayHandle<Projection>),
+}
+
+impl Projector {
+    pub fn window(handle: WindowHandle, state: AppHandle<Projection>) -> Self {
+        Self::Window { handle, state }
+    }
+
+    pub fn overlay(handle: OverlayHandle<Projection>) -> Self {
+        Self::Overlay(handle)
+    }
+
+    /// Show the picture on `display`, covering it whole.
+    fn show(&self, display: &Display) {
+        match self {
+            Self::Window { handle, .. } => {
+                // The size follows the display chosen while presenting; where `place` also sizes
+                // windows it asks for the same rectangle.
+                handle.resize_instant(display_points(display));
+                // A borderless window covering the display, the way PowerPoint's presenter output
+                // and an OBS projector do it: no exclusive full screen, so other windows can still
+                // come up.
+                handle.place(display_target(display), OverlayPlacement::FullScreen);
+                handle.open();
+            }
+            Self::Overlay(handle) => {
+                handle.set_display(display_target(display));
+                handle.show();
+            }
+        }
+    }
+
+    fn hide(&self) {
+        match self {
+            Self::Window { handle, .. } => handle.hide(),
+            Self::Overlay(handle) => handle.hide(),
+        }
+    }
+
+    /// `On top` for the window. A layer-shell overlay already sits above ordinary windows.
+    fn set_always_on_top(&self, on: bool) {
+        if let Self::Window { handle, .. } = self {
+            handle.set_always_on_top(on);
+        }
+    }
+
+    /// Push the current clip, fit and cursor policy to the projector.
+    fn sync(&self, player: Option<Arc<Player>>, fit: FitMode, hide_cursor: bool) {
+        match self {
+            Self::Window { state, .. } => state.update(move |projection, _| {
+                projection.player = player;
+                projection.fit = fit;
+                projection.hide_cursor = hide_cursor;
+            }),
+            Self::Overlay(handle) => handle.update(move |projection, _| {
+                projection.player = player;
+                projection.fit = fit;
+                projection.hide_cursor = hide_cursor;
+            }),
+        }
+    }
 }
 
 pub fn clock(seconds: f64) -> String {
@@ -239,16 +325,9 @@ impl Presenter {
         }
     }
 
-    /// Push the current clip, fit and cursor policy to the projector window.
+    /// Push the current clip, fit and cursor policy to the projector.
     fn sync_projection(&self) {
-        let player = self.player.clone();
-        let fit = self.cfg.fit;
-        let hide_cursor = self.cfg.hide_cursor;
-        self.projection_state.update(move |projection, _| {
-            projection.player = player;
-            projection.fit = fit;
-            projection.hide_cursor = hide_cursor;
-        });
+        self.projection.sync(self.player.clone(), self.cfg.fit, self.cfg.hide_cursor);
     }
 
     pub fn toggle_present(&mut self) {
@@ -265,15 +344,8 @@ impl Presenter {
             return;
         };
         let display = self.displays[index].clone();
-        let target = match &display.id {
-            Some(id) => DisplayTarget::Id(id.clone()),
-            None => DisplayTarget::Primary,
-        };
-        // A borderless window covering the display, the way PowerPoint's presenter output and an
-        // OBS projector do it: no exclusive full screen, so other windows can still come up.
-        self.projection.place(target, OverlayPlacement::FullScreen);
+        self.projection.show(&display);
         self.projection.set_always_on_top(self.cfg.always_on_top);
-        self.projection.open();
         self.presenting = true;
         self.error = None;
         if let Some(player) = &self.player {

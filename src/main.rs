@@ -14,7 +14,10 @@ mod ui;
 
 use media::Tools;
 use player::Wakers;
-use rune::{App, AppSpec, AnyWindowSpec, Display, WindowOptions, WindowSpec};
+use rune::{
+    App, AppSpec, AnyWindowSpec, Display, DisplayTarget, KeyPolicy, OverlayInput, OverlayOptions,
+    OverlayPlacement, OverlaySpec, WindowOptions, WindowSpec,
+};
 use settings::Settings;
 use std::path::PathBuf;
 use ui::{Presenter, Projection};
@@ -60,7 +63,7 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
     let wakers = Wakers::new();
     let displays: Vec<Display> = displays.to_vec();
 
-    let control = App::new(AppSpec {
+    let mut control = App::new(AppSpec {
         min_size: Some((860.0, 620.0)),
         setup: Some(ui::presenter_setup),
         poll: Some(ui::presenter_poll),
@@ -70,38 +73,60 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
     let control_handle = control.handle();
 
     let target = cfg.resolve(&displays).map(|index| displays[index].clone());
-    let options = WindowOptions {
-        // Created hidden and placed by Present, so nothing flashes on the wrong display.
-        visible: false,
-        borderless: true,
-        always_on_top: cfg.always_on_top,
-        resizable: false,
-        min_size: Some((0.0, 0.0)),
-        position: target.as_ref().map(|display| display.position),
-        physical_size: target.as_ref().map(|display| display.size),
-        ..Default::default()
+    // Points, not physical pixels: where `place` works it sets the exact physical rectangle anyway.
+    let size = target.as_ref().map(ui::display_points).unwrap_or((1280.0, 720.0));
+    let initial = target.as_ref().map(ui::display_target).unwrap_or(DisplayTarget::Primary);
+
+    let state = Projection {
+        player: None,
+        fit: cfg.fit,
+        hide_cursor: cfg.hide_cursor,
+        presenter: control_handle.clone(),
+        wakers: wakers.clone(),
     };
 
-    let projection = App::new(AppSpec {
-        min_size: Some((0.0, 0.0)),
-        setup: Some(ui::projection_setup),
-        on_key: Some(ui::projection_key),
-        ..AppSpec::new("vidshow — presentation", (1280.0, 720.0), no_projection, ui::projection_view)
-    })
-    .on_close(ui::projection_closed);
-
-    let mut control = control;
-    let (projection_state, projection_window) = control.window(
-        WindowSpec::from_app("projection", projection)
-            .state(Projection {
-                player: None,
-                fit: cfg.fit,
-                hide_cursor: cfg.hide_cursor,
-                presenter: control_handle.clone(),
-                wakers: wakers.clone(),
-            })
-            .options(options),
-    );
+    // Wayland gives a client no say in where a window opens, so there the picture is a layer-shell
+    // overlay pinned to the chosen output. Everywhere else it is an ordinary window, placed.
+    let projection = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ui::Projector::overlay(
+            control.overlay(
+                OverlaySpec::new("vidshow — presentation", size, ui::projection_view)
+                    .options(OverlayOptions {
+                        placement: Some(OverlayPlacement::FullScreen),
+                        display: initial,
+                        // The picture takes no clicks or keys; the control window keeps both.
+                        input: OverlayInput::None,
+                        keys: KeyPolicy::None,
+                        ..Default::default()
+                    })
+                    .setup(ui::projection_setup),
+                state,
+            ),
+        )
+    } else {
+        let options = WindowOptions {
+            // Created hidden and placed by Present, so nothing flashes on the wrong display.
+            visible: false,
+            borderless: true,
+            always_on_top: cfg.always_on_top,
+            resizable: false,
+            min_size: Some((0.0, 0.0)),
+            position: target.as_ref().map(|display| display.position),
+            ..Default::default()
+        };
+        let app = App::new(AppSpec {
+            min_size: Some((0.0, 0.0)),
+            setup: Some(ui::projection_setup),
+            on_key: Some(ui::projection_key),
+            ..AppSpec::new("vidshow — presentation", size, no_projection, ui::projection_view)
+        })
+        .on_close(ui::projection_closed)
+        // Maps at its final size, so a tiling window manager floats it instead of tiling it.
+        .float_on_open();
+        let (state, handle) = control
+            .window(WindowSpec::from_app("projection", app).state(state).options(options));
+        ui::Projector::window(handle, state)
+    };
 
     let control = control.init(move || Presenter {
         tools,
@@ -111,8 +136,7 @@ fn build(file: Option<PathBuf>, present: bool, autoplay: bool, displays: &[Displ
         cfg,
         displays,
         presenting: false,
-        projection: projection_window,
-        projection_state,
+        projection,
         wakers: wakers.clone(),
         pending: file,
         auto_present: present,
