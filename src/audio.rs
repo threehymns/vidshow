@@ -7,6 +7,7 @@
 #[cfg(any(windows, target_os = "linux"))]
 mod imp {
     use crate::media::{self, MediaInfo, Tools};
+    use crate::settings::MAX_VOLUME;
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::collections::VecDeque;
     use std::io::Read;
@@ -72,7 +73,13 @@ mod imp {
 
     pub struct Audio {
         shared: Shared,
+        /// What the device plays.
         gain: Arc<AtomicU32>,
+        /// The volume alone, without the mute, so the meters keep showing the signal while the
+        /// output is silenced.
+        meter: Arc<AtomicU32>,
+        /// The loudest sample each channel has played since the meters last read them.
+        peaks: Arc<[AtomicU32; 2]>,
         reader: Option<std::thread::JoinHandle<()>>,
         host: Option<std::thread::JoinHandle<()>>,
         host_stop: Arc<AtomicBool>,
@@ -97,6 +104,8 @@ mod imp {
                 note: Arc::new(Mutex::new(None)),
             };
             let gain = Arc::new(AtomicU32::new(1f32.to_bits()));
+            let meter = Arc::new(AtomicU32::new(1f32.to_bits()));
+            let peaks = Arc::new([AtomicU32::new(0), AtomicU32::new(0)]);
             let host_stop = Arc::new(AtomicBool::new(false));
             let (ready_tx, ready_rx) = mpsc::channel();
             let host = {
@@ -106,7 +115,10 @@ mod imp {
                     gain.clone(),
                     host_stop.clone(),
                 );
-                std::thread::spawn(move || host_loop(ready_tx, ring, ctl, gain, host_stop))
+                let (meter, peaks) = (meter.clone(), peaks.clone());
+                std::thread::spawn(move || {
+                    host_loop(ready_tx, ring, ctl, gain, meter, peaks, host_stop)
+                })
             };
             let (rate, channels) = match ready_rx.recv_timeout(Duration::from_secs(8)) {
                 Ok(Ok(format)) => format,
@@ -131,6 +143,8 @@ mod imp {
             Ok(Self {
                 shared,
                 gain,
+                meter,
+                peaks,
                 reader: Some(reader),
                 host: Some(host),
                 host_stop,
@@ -157,8 +171,24 @@ mod imp {
             self.shared.stop_process();
         }
 
-        pub fn set_gain(&self, gain: f32) {
-            self.gain.store(gain.clamp(0.0, 1.0).to_bits(), SeqCst);
+        /// Sets what the device plays and what the meters see. The two differ while muted: the
+        /// output falls silent and the meters keep the level, so the bars fade rather than empty.
+        pub fn set_levels(&self, output: f32, meter: f32) {
+            // Both are allowed up to the fader's boost: the meter has to see the gain the boost
+            // added, or a pushed signal would read as clean and the clip lamp would never light.
+            self.gain
+                .store(output.clamp(0.0, MAX_VOLUME).to_bits(), SeqCst);
+            self.meter
+                .store(meter.clamp(0.0, MAX_VOLUME).to_bits(), SeqCst);
+        }
+
+        /// The loudest sample each channel has played since the last call, which is what the meters
+        /// draw. Reading it clears it, so a burst between two frames is not missed.
+        pub fn peaks(&self) -> [f32; 2] {
+            [
+                f32::from_bits(self.peaks[0].swap(0, SeqCst)),
+                f32::from_bits(self.peaks[1].swap(0, SeqCst)),
+            ]
         }
 
         /// Anything the decoder said, for the control window.
@@ -193,6 +223,8 @@ mod imp {
         ring: Arc<Mutex<Ring>>,
         ctl: Arc<Mutex<Ctl>>,
         gain: Arc<AtomicU32>,
+        meter: Arc<AtomicU32>,
+        peaks: Arc<[AtomicU32; 2]>,
         stop: Arc<AtomicBool>,
     ) {
         let host = cpal::default_host();
@@ -223,7 +255,8 @@ mod imp {
             &config,
             {
                 let ring = ring.clone();
-                let gain = gain.clone();
+                let (gain, meter) = (gain.clone(), meter.clone());
+                let peaks = peaks.clone();
                 let silent = silent.clone();
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if silent() {
@@ -231,15 +264,31 @@ mod imp {
                         return;
                     }
                     let level = f32::from_bits(gain.load(SeqCst));
+                    let shown = f32::from_bits(meter.load(SeqCst));
+                    // The loudest sample of this block on each channel. It is measured before the
+                    // mute is applied, so muting fades the meters instead of emptying them.
+                    let mut loudest = [0.0f32; 2];
                     match ring.try_lock() {
                         Ok(mut ring) => {
-                            for sample in data.iter_mut() {
-                                *sample = ring.samples.pop_front().unwrap_or(0.0) * level;
+                            for (index, sample) in data.iter_mut().enumerate() {
+                                let raw = ring.samples.pop_front().unwrap_or(0.0);
+                                *sample = raw * level;
+                                let channel = index % channels as usize;
+                                if channel < 2 {
+                                    loudest[channel] = loudest[channel].max((raw * shown).abs());
+                                }
                             }
                         }
                         // The decoder holds the ring for a few microseconds; a short silence
                         // beats blocking the audio thread.
                         Err(_) => data.fill(0.0),
+                    }
+                    // A mono device drives both meters, so a stereo file still reads L and R.
+                    if channels < 2 {
+                        loudest[1] = loudest[0];
+                    }
+                    for (peak, loud) in peaks.iter().zip(loudest) {
+                        peak.fetch_max(loud.to_bits(), SeqCst);
                     }
                 }
             },
@@ -404,7 +453,11 @@ mod imp {
         pub fn play(&self) {}
         pub fn pause(&self) {}
         pub fn seek(&self, _seconds: f64) {}
-        pub fn set_gain(&self, _gain: f32) {}
+        pub fn set_levels(&self, _output: f32, _meter: f32) {}
+        /// There is no output to measure on a platform without sound.
+        pub fn peaks(&self) -> [f32; 2] {
+            [0.0; 2]
+        }
         pub fn note(&self) -> Option<String> {
             None
         }

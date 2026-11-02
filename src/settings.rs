@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The loudest the volume can be set: 2.0 is +6 dB, so a quiet file can be pushed past unity the
+/// way a player's 200% setting can. Unity itself (1.0, 0 dB) is where the fader's 0 mark sits.
+pub const MAX_VOLUME: f32 = 2.0;
+
 /// How the picture fills the presentation display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -15,6 +19,9 @@ pub enum FitMode {
 }
 
 impl FitMode {
+    /// Both modes, in the order the picker offers them.
+    pub const ALL: [Self; 2] = [Self::Fit, Self::Fill];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Fit => "Fit",
@@ -22,11 +29,9 @@ impl FitMode {
         }
     }
 
-    pub fn other(self) -> Self {
-        match self {
-            Self::Fit => Self::Fill,
-            Self::Fill => Self::Fit,
-        }
+    /// The mode a picker label names, if it names one.
+    pub fn from_label(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.label() == label)
     }
 
     pub fn surface(self) -> rune::SurfaceFit {
@@ -202,7 +207,7 @@ impl Settings {
         if !self.volume.is_finite() {
             self.volume = 1.0;
         }
-        self.volume = self.volume.clamp(0.0, 1.0);
+        self.volume = self.volume.clamp(0.0, MAX_VOLUME);
         self
     }
 
@@ -299,9 +304,10 @@ mod tests {
             .validated()
             .volume
         };
-        assert_eq!(read_back(4.0), 1.0);
+        assert_eq!(read_back(4.0), MAX_VOLUME);
         assert_eq!(read_back(f32::NAN), 1.0);
         assert_eq!(read_back(-2.0), 0.0);
+        assert_eq!(read_back(1.5), 1.5, "a boost is a setting, not a typo");
     }
 
     #[test]
