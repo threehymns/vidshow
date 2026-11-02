@@ -7,6 +7,7 @@
 mod keys;
 mod settings_popup;
 mod view;
+pub mod volume;
 
 pub use keys::presenter_key;
 pub use view::presenter_view;
@@ -16,11 +17,12 @@ use crate::keybinds::{Action, Keybinds};
 use crate::media::{Rotation, Tools};
 use crate::player::{Player, State, Wakers};
 use crate::projection::Projector;
-use crate::settings::{DisplayKey, Settings, TargetDisplay};
+use crate::settings::{DisplayKey, FitMode, MAX_VOLUME, Settings, TargetDisplay};
 use rune::{Display, FileDialogOptions, Tx};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use volume::Volume;
 
 /// The formats the file picker offers first. ffmpeg itself reads far more; this is only a filter.
 pub const VIDEO_EXTENSIONS: &[&str] = &[
@@ -61,6 +63,8 @@ pub enum Overlay {
     None,
     /// The display picker, over the header.
     DisplayPicker,
+    /// The fit dropdown, beside the display picker.
+    FitPicker,
     /// The settings dialog, which is modal.
     Settings,
 }
@@ -85,6 +89,8 @@ pub struct Presenter {
     pub startup: Option<Startup>,
     /// While the pointer drags the seek bar: the fraction it is over.
     pub scrub: Option<f64>,
+    /// The volume section's meters: what each channel is showing, and how far the mute has faded it.
+    pub volume: Volume,
 }
 
 impl Presenter {
@@ -127,8 +133,8 @@ impl Presenter {
             Action::SeekBackFast => self.seek_by(-30.0),
             Action::SeekForward => self.seek_by(5.0),
             Action::SeekForwardFast => self.seek_by(30.0),
-            Action::VolumeUp => self.change_volume(0.05),
-            Action::VolumeDown => self.change_volume(-0.05),
+            Action::VolumeUp => self.change_volume(3.0),
+            Action::VolumeDown => self.change_volume(-3.0),
             _ => return false,
         }
         true
@@ -147,6 +153,8 @@ impl Presenter {
     fn load_with(&mut self, path: PathBuf, autoplay: bool) {
         // Drops the previous clip first: that stops its decoder and audio threads.
         self.clip = Clip::None;
+        // The last clip's clip is not this one's to report.
+        self.volume.clear_clip();
         self.notice = None;
         self.dismissed = None;
         let loaded = match &self.tools {
@@ -195,17 +203,26 @@ impl Presenter {
         self.apply();
     }
 
-    fn change_volume(&mut self, delta: f32) {
-        self.cfg.volume = (self.cfg.volume + delta).clamp(0.0, 1.0);
+    /// Sets the volume outright, for the fader. Anything above silence lifts the mute, so dragging
+    /// the fader always does something audible.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.cfg.volume = volume.clamp(0.0, MAX_VOLUME);
         if self.cfg.volume > 0.0 {
             self.cfg.muted = false;
         }
         self.apply();
     }
 
-    fn toggle_fit(&mut self) {
-        self.cfg.fit = self.cfg.fit.other();
-        self.apply();
+    /// Steps the volume in dB rather than in gain, so a press is the same change at the top of the
+    /// fader as it is near silence — the keys follow the same scale the travel does.
+    fn change_volume(&mut self, db: f32) {
+        self.set_volume(volume::stepped(self.cfg.volume, db));
+    }
+
+    /// Puts the fader back on unity, which is where a double-click leaves a fader in a console or a
+    /// DAW, and the one setting worth finding without aiming.
+    pub fn reset_volume(&mut self) {
+        self.set_volume(1.0);
     }
 
     fn toggle_preview(&mut self) {
@@ -269,6 +286,27 @@ impl Presenter {
         } else {
             Overlay::DisplayPicker
         };
+    }
+
+    /// Opens the fit dropdown, or closes it when it is already open. Unlike the displays, both
+    /// modes are always on offer.
+    pub fn toggle_fit_picker(&mut self) {
+        self.overlay = if self.overlay == Overlay::FitPicker {
+            Overlay::None
+        } else {
+            Overlay::FitPicker
+        };
+    }
+
+    /// Applies a choice made in the fit dropdown, which reports the label rather than the mode.
+    fn choose_fit_label(&mut self, label: &str) -> bool {
+        let Some(fit) = FitMode::from_label(label) else {
+            return false;
+        };
+        self.cfg.fit = fit;
+        self.overlay = Overlay::None;
+        self.apply();
+        true
     }
 
     fn choose_display(&mut self, index: usize) {
@@ -383,7 +421,7 @@ impl Presenter {
     /// Escape closes what is on top first: the dialog, the picker, then the presentation.
     fn close_top(&mut self) -> bool {
         match self.overlay {
-            Overlay::Settings | Overlay::DisplayPicker => {
+            Overlay::Settings | Overlay::DisplayPicker | Overlay::FitPicker => {
                 self.overlay = Overlay::None;
                 true
             }
@@ -449,10 +487,18 @@ pub fn presenter_setup(s: &mut Presenter, waker: rune::Waker) {
     }
 }
 
-pub fn presenter_poll(s: &mut Presenter, _now: f64, tx: &mut Tx) -> bool {
-    // Keep the clock and progress bar moving while the clip plays.
-    if s.clip.player().is_some_and(|player| player.is_playing()) {
-        tx.wake_after(Duration::from_millis(60));
+pub fn presenter_poll(s: &mut Presenter, now: f64, tx: &mut Tx) -> bool {
+    // While the clip plays the clock, the progress bar and the meters all need a steady frame; once
+    // it stops, the meters still have to run down to silence before the window can rest.
+    let playing = s.clip.player().is_some_and(|player| player.is_playing());
+    if playing || s.volume.settling() {
+        let peaks = s
+            .clip
+            .player()
+            .map(|player| player.peaks())
+            .unwrap_or([0.0; 2]);
+        s.volume.tick(now, peaks, s.cfg.muted);
+        tx.wake_after(Duration::from_millis(33));
         return true;
     }
     false

@@ -2,7 +2,8 @@
 
 use super::settings_popup;
 use super::{Overlay, Presenter};
-use rune::{Color, Cursor, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
+use crate::settings::FitMode;
+use rune::{Color, Cx, Drag, El, Icon, Phase, Tx, col, el, icon, row, spacer, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Progress, Select,
     Toast, ToastRegion,
@@ -41,20 +42,6 @@ static LOOP_OFF: Icon = Icon {
     body: r#"<path d="M11.3 5 14 7.7l-2.7 2.7" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 11V10.4A2.7 2.7 0 0 1 4.7 7.7H14" stroke="currentColor" stroke-linecap="round"/>"#,
 };
 
-/// Sound on: a speaker cone with two waves.
-static SPEAKER: Icon = Icon {
-    name: "vidshow-speaker",
-    view: 16.0,
-    body: r#"<path d="M9 4 5.5 6.5H2.5v3h3L9 12z" stroke="currentColor" stroke-linejoin="round"/><path d="M10.7 6.3a2.6 2.6 0 0 1 0 3.4M12.5 4.8a4.8 4.8 0 0 1 0 6.4" stroke="currentColor" stroke-linecap="round"/>"#,
-};
-
-/// Sound off: the same cone, with the waves replaced by a cross.
-static SPEAKER_MUTED: Icon = Icon {
-    name: "vidshow-speaker-muted",
-    view: 16.0,
-    body: r#"<path d="M9 4 5.5 6.5H2.5v3h3L9 12z" stroke="currentColor" stroke-linejoin="round"/><path d="M11 6.2l3.2 3.2M14.2 6.2 11 9.4" stroke="currentColor" stroke-linecap="round"/>"#,
-};
-
 pub fn clock(seconds: f64) -> String {
     if !seconds.is_finite() || seconds <= 0.0 {
         return "0:00".to_string();
@@ -72,16 +59,19 @@ pub fn presenter_view(s: &Presenter, cx: &mut Cx<Presenter>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
     // Panels that float above the window are collected while the rest is built.
     let mut layer = Vec::new();
+    // The window is the theme's base surface, not its deepest one: the chrome should read as an
+    // ordinary app window, and the picture's own well is the dark part.
     let root = col()
         .w_full()
         .h_full()
-        .fill(k.c.bg_deep)
+        .fill(k.c.bg_base)
         .padding(14.0)
         .gap(10.0)
         .child(header(s, k, &mut layer))
         .child(stage(s, k))
         .child(scrub_row(s, k))
         .child(transport(s, k))
+        .child(s.volume.section(s, k))
         .on_drop_files(|s: &mut Presenter, files, _tx| {
             if let Some(first) = files.first() {
                 s.load(first.clone());
@@ -108,13 +98,56 @@ fn problem_toast(s: &Presenter, k: &Kit, layer: &mut Vec<El>) {
     layer.push(ToastRegion::new().toast(toast).build(k));
 }
 
-/// The clip's name and details, the display picker, and the window's own buttons.
+/// Three groups, left to right: the clip (its name and how to open another), where the picture
+/// goes, and the window's own settings. The gaps inside a group are tighter than the gaps
+/// between them, so each group reads as one thing.
 fn header(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
+    row()
+        .h(36.0)
+        .gap(12.0)
+        .center_y()
+        .w_full()
+        .child(clip_group(s, k))
+        .child(spacer())
+        .child(presenting_group(s, k, layer))
+        .child(
+            IconButton::new(&oc::SETTINGS_GEAR)
+                .control_size(ControlSize::Large)
+                .help("Settings")
+                .on_press(|s: &mut Presenter| s.overlay = Overlay::Settings)
+                .build(k),
+        )
+}
+
+/// What is open, and the button that opens something else in its place.
+fn clip_group(s: &Presenter, k: &Kit) -> El {
+    row().gap(8.0).center_y().child(title(s, k)).child(
+        Button::new("Open…")
+            .control_size(ControlSize::Large)
+            .on_press_tx(Presenter::pick)
+            .build(k),
+    )
+}
+
+/// Everything about the presentation, side by side: where the picture goes, how it fills that
+/// display, and the switch that sends it there. None of it lives down in the transport, because
+/// none of it is about the clip.
+fn presenting_group(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
+    row()
+        .gap(6.0)
+        .center_y()
+        .child(display_trigger(s, k, layer))
+        .child(fit_trigger(s, k, layer))
+        .child(present_button(s, k))
+}
+
+/// The display picker: the monitor mark and the chosen display, over the listbox.
+fn display_trigger(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
     let selected = s.selected_display();
     let labels = s.display_labels();
     // With no display there is nothing to pick from, so the listbox never opens.
     let open = s.overlay == Overlay::DisplayPicker && !labels.is_empty();
-    let trigger = row()
+    row()
         .key("present_on_mark")
         .gap(6.0)
         .center_y()
@@ -130,30 +163,27 @@ fn header(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
                     s.choose_display_label(value);
                 })
                 .build(k, layer),
-        );
+        )
+}
 
-    row()
-        .h(36.0)
-        .gap(10.0)
-        .center_y()
-        .w_full()
-        .child(title(s, k))
-        .child(trigger)
-        .child(spacer())
-        .child(
-            IconButton::new(&oc::SETTINGS_GEAR)
-                .control_size(ControlSize::Large)
-                .help("Settings")
-                .on_press(|s: &mut Presenter| s.overlay = Overlay::Settings)
-                .build(k),
-        )
-        .child(
-            Button::new("Open…")
-                .control_size(ControlSize::Large)
-                .on_press_tx(Presenter::pick)
-                .build(k),
-        )
-        .child(present_button(s, k))
+/// How the picture fills the display: Fit or Fill, chosen from a list rather than cycled with a
+/// button, so the mode it will switch to is visible before it is picked.
+fn fit_trigger(s: &Presenter, k: &Kit, layer: &mut Vec<El>) -> El {
+    let labels: Vec<String> = FitMode::ALL
+        .iter()
+        .map(|mode| mode.label().to_string())
+        .collect();
+    row().key("fit_mark").gap(6.0).center_y().child(
+        Select::new("fit", &labels)
+            .current(Some(s.cfg.fit.label()))
+            .open(s.overlay == Overlay::FitPicker)
+            .on_toggle(|s: &mut Presenter| s.toggle_fit_picker())
+            .on_close(|s: &mut Presenter| s.dismiss(Overlay::FitPicker))
+            .on_choose(|s: &mut Presenter, value: &str, _tx: &mut Tx| {
+                s.choose_fit_label(value);
+            })
+            .build(k, layer),
+    )
 }
 
 fn title(s: &Presenter, k: &Kit) -> El {
@@ -220,12 +250,13 @@ fn stage(s: &Presenter, k: &Kit) -> El {
             )
             .on_press(Presenter::toggle_playing),
         None => stage
-            .fill(k.c.bg_base)
+            .fill(k.c.bg_deep)
             .border(1.0, k.c.border_muted)
             .border_dash(7.0, 6.0)
-            .hover(k.c.hover)
+            // Between the well's own shade and the window's, so aiming at the drop zone lifts it
+            // without turning it into a different surface.
+            .hover(k.c.bg_deep.mix(k.c.bg_base, 0.5))
             .press(k.c.pressed)
-            .cursor(Cursor::Pointer)
             .center()
             .child(empty_stage(k))
             .on_press_tx(Presenter::pick),
@@ -303,7 +334,8 @@ fn seek_bar(k: &Kit, s: &Presenter, duration: f64, progress: f32) -> El {
         })
 }
 
-/// Play, the toggles that only matter while it plays, and the fit.
+/// Play, and the toggle that only matters while it plays. Sound is not here: the volume section
+/// owns it, with a fader and a MUTE, so the transport does not offer it twice.
 fn transport(s: &Presenter, k: &Kit) -> El {
     let playing = s.clip.player().is_some_and(|player| player.is_playing());
     row()
@@ -324,19 +356,6 @@ fn transport(s: &Presenter, k: &Kit) -> El {
             ("Loop on", "Loop off"),
             Presenter::toggle_loop,
         ))
-        .child(toggle_button(
-            k,
-            !s.cfg.muted,
-            (&SPEAKER, &SPEAKER_MUTED),
-            ("Sound on", "Sound off"),
-            Presenter::toggle_mute,
-        ))
-        .child(
-            Button::new(s.cfg.fit.label())
-                .control_size(ControlSize::Large)
-                .on_press(Presenter::toggle_fit)
-                .build(k),
-        )
 }
 
 /// A player-style toggle: the glyph, the brightness and the tooltip all follow one flag, so an

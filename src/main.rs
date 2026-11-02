@@ -166,6 +166,7 @@ fn build(startup: Startup, displays: &[Display]) -> Vec<AnyWindowSpec> {
         dismissed: None,
         startup: Some(startup),
         scrub: None,
+        volume: control::volume::Volume::default(),
     });
 
     vec![WindowSpec::from_app("control", control).into()]

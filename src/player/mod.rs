@@ -18,6 +18,7 @@ pub use wakers::Wakers;
 
 use crate::audio::Audio;
 use crate::media::{self, MediaInfo, Tools};
+use crate::settings::MAX_VOLUME;
 use playback::Playback;
 use rune::NativeSurface;
 use rune::native_surface::{ByteFrame, ColorInfo, Format};
@@ -244,7 +245,14 @@ impl Inner {
     }
 
     fn set_gain(&self) {
-        self.with_audio(|audio| audio.set_gain(if self.muted() { 0.0 } else { self.volume() }));
+        // The meters follow the volume but not the mute: muting fades what the section draws
+        // instead of emptying it, so the bars stay where the signal actually is.
+        self.with_audio(|audio| {
+            audio.set_levels(
+                if self.muted() { 0.0 } else { self.volume() },
+                self.volume(),
+            )
+        });
     }
 
     fn volume(&self) -> f32 {
@@ -341,6 +349,18 @@ impl Player {
         }
     }
 
+    /// The loudest sample each output channel has played since the last call, for the meters.
+    /// Silence when the file has no audio track, and on platforms without sound.
+    pub fn peaks(&self) -> [f32; 2] {
+        self.inner
+            .audio
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(Audio::peaks)
+            .unwrap_or([0.0; 2])
+    }
+
     pub fn audio_note(&self) -> Option<String> {
         let startup = self.inner.audio_note.lock().unwrap().clone();
         startup.or_else(|| {
@@ -401,7 +421,7 @@ impl Player {
     pub fn set_volume(&self, volume: f32) {
         self.inner
             .volume
-            .store(volume.clamp(0.0, 1.0).to_bits(), SeqCst);
+            .store(volume.clamp(0.0, MAX_VOLUME).to_bits(), SeqCst);
         self.inner.set_gain();
     }
 
