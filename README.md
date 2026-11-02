@@ -86,6 +86,10 @@ starts: if you plug a monitor in while vidshow is running, restart it to see the
 
 `"display"` may also be `{ "mode": "secondary" }` (the default) or `{ "mode": "primary" }`.
 
+`"volume"` is a gain: `1.0` is unity (0 dB, the fader's 0 mark), `0.0` is silence, and the top of
+the fader is `2.0` (+6 dB), so a quiet file can be pushed past unity the way a player's 200%
+setting can.
+
 ## Linux
 
 The control window and the projector both work on X11 and on Wayland, and sound plays through
@@ -140,7 +144,7 @@ To undo it:
 | Space | play / pause | play / pause |
 | ← / → | seek 5 s (Shift: 30 s) | seek 5 s (Shift: 30 s) |
 | Home | back to the start | back to the start |
-| ↑ / ↓ | volume ±5% | — |
+| ↑ / ↓ | volume ±3 dB | — |
 | F | present / stop presenting | — |
 | Escape | stop presenting | stop presenting |
 | M | mute | mute |
